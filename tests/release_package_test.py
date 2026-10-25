@@ -33,11 +33,12 @@ class ReleaseTests(unittest.TestCase):
                 self.assertEqual(set(package.namelist()), {prefix + path for path in builder.RUNTIME_FILES})
                 manifest = json.loads(package.read(prefix + "mod.json"))
                 self.assertEqual(manifest["modId"], "easier_waypoints")
-                self.assertEqual(manifest["revision"], 1)
+                self.assertEqual(manifest["revision"], 2)
                 self.assertNotIn("version", manifest)
                 self.assertEqual(package.read(prefix + "license.txt"), (ROOT / "LICENSE").read_bytes())
+                # No mod.io listing is ever baked into the runtime package.
                 for name in package.namelist():
-                    self.assertNotIn(b"6428298", package.read(name))
+                    self.assertNotRegex(package.read(name), rb"modapi\.io|mod\.io/g/|/mods/\d+")
                 info = json.loads(package.read(prefix + "_metadata/modinfo.json"))
                 self.assertIn("v" + (ROOT / "VERSION").read_text().strip(), info["description"])
 
@@ -52,7 +53,7 @@ class ReleaseTests(unittest.TestCase):
         labels = module("set_modio_version")
         with patch.dict(labels.os.environ, {"MODIO_MOD_ID": "12345"}, clear=True):
             self.assertEqual(labels.target_base(), "https://g-10640.modapi.io/v1/games/10640/mods/12345/files")
-        for bad in ("0", "-1", "true", "123/../../6428298", "1.5", "https://example.org"):
+        for bad in ("0", "-1", "true", "123/../../999", "1.5", "https://example.org"):
             with patch.dict(labels.os.environ, {"MODIO_MOD_ID": bad}, clear=True):
                 with self.assertRaises(ValueError):
                     labels.target_base()

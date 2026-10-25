@@ -2,58 +2,90 @@
 
 **One road. One direction. No guesswork.**
 
-An experimental Transport Fever 3 UI mod that makes the selected road lane and
-its travel direction visible before a waypoint is placed or moved.
+An experimental Transport Fever 3 UI mod that shows where a waypoint will go
+before it is placed: the lane, its direction of travel and the stretch of the line
+being edited. It covers road, tram, rail, ship and air lines.
 
-## Prototype status
+## Status
 
-Version **0.1.0**, game revision **1**. Offline checks cover geometry, cyclic stop
-sequences, UI delegation and release tooling. **In-game rendering, save/load and
-stable-branch compatibility have not been verified.** The inspected installation
-was Linux Steam preview build 26129055. This is a prototype, not a finished mod.
+Version **0.2.0**, game revision **2**. Offline checks cover lane geometry, the
+direction cross-check, stretch resolution, UI delegation, the placement tool, Lua
+5.2 compatibility and release tooling. **Nothing has been verified in-game yet.**
+Code was checked against Linux Steam preview build 26129055. Treat this as a test
+build.
 
-- Cyan highlights the candidate lane; white arrows show its direction.
-- An edge reported as bidirectional gets arrows both ways.
-- The stop panel names the selected stretch between stops.
-- Unsupported or stale candidate data keeps the game's original feedback.
-- Native controls still place, move and remove waypoints. No simulation commands,
-  custom save data, automatic route correction or background line updates.
+- **Place Waypoint** in the stop panel opens a placement tool on top of the Line
+  Manager. It highlights the lane under the cursor (cyan, or red where the line's
+  vehicles can't go), draws the direction of travel, and names the stretch. Each
+  click adds the next waypoint in order; Back finishes. No modifier key is needed.
+- The native flow still works. Its tooltips now say that the precision-mode key
+  (shown as a key hint) must be held while clicking, and they explain direction.
+- Arrows only appear when the lanes at that spot agree with the street's own lane
+  config. Otherwise the lane is highlighted without an arrow and the tooltip says
+  the direction couldn't be confirmed. Tracks are shown as usable both ways.
+- Ships and aircraft get a point marker. Water-on-land and too-close checks match
+  the game's own rules.
+- The stop panel shows the stretch the game will really edit. This includes the
+  "no stretch selected" case, where native `addWaypoint` inserts before the last
+  entry rather than appending.
+- Every change is committed by the Line Manager's own `addWaypoint`. Hovering and
+  cancelling never edit the line. No custom save data, automatic route correction
+  or background line updates.
 
-The prototype uses TF3's `react-replacement-config`, `ReplaceRecipe` and
-`CallOriginalRecipe` APIs. It replaces three small tooltip recipes and wraps the
-stop panel; it does not replace the Line Manager implementation or monkey-patch
-module functions. Other UI mods targeting these same recipes can conflict.
+| Line type | Waypoint | What is shown |
+|---|---|---|
+| Road, tram | Lane snap | Lane highlight, confirmed travel arrow, stretch |
+| Rail | Track snap | Track highlight, both-way arrows (the route decides), stretch |
+| Ship, aircraft | Point | Marker, water/too-close feedback, stretch |
+
+The mod uses TF3's `react-replacement-config`, `ReplaceRecipe` and
+`CallOriginalRecipe` APIs to replace three small tooltip recipes and wrap the stop
+panel. The placement tool is a normal stacked tool (`toolStack.push`) whose
+overlay is a direct `ActionDescriptor` child, the same mount the game uses for
+mission arrows. It does not replace the Line Manager or monkey-patch module
+functions. Other UI mods replacing the same recipes conflict silently: the game
+keeps one replacement per recipe.
 
 ## Trying it locally
 
-Build the ZIP with `python3 scripts/package_release.py`. Use a disposable save.
-Open the game's user-data folder from Settings → Advanced, then put the
+Build the ZIP with `python3 scripts/package_release.py`. Back up the save you test
+with. Open the game's user-data folder from Settings → Advanced, then put the
 `easier_waypoints_1` folder from the ZIP into its development `staging_area`.
-Restart the game, enable Easier Waypoints, and select a road line in Line Manager.
-Select the stretch to edit and use the game's displayed Add Waypoint action.
-Hover over both sides of a road before clicking. Move/remove existing waypoints
-with the normal native controls. There is no standalone placement button yet.
+Restart the game and enable Easier Waypoints. In the Line Manager, select a line,
+then the stretch to edit, and press **Place Waypoint**.
 
-First check that the highlight and arrows appear before clicking, follow a curve
-and slope, and disappear when leaving placement. Check that hover/cancel does not
-edit the line. Bridges, tunnels, junctions, one-way roads and UI scaling need
-in-game verification. Unsupported junction-only networks deliberately fall back
-to native feedback. Reachability and full proposed routes are not predicted.
+In-game checks still needed, in order:
+
+1. The mod loads without errors (check `stdout.txt` in the user-data folder).
+2. The placement tool's highlight, arrows and markers appear. Check whether the
+   native-flow tooltip overlay also appears; it may not render from a tooltip.
+3. Arrows match real traffic on both sides of a two-way road, a one-way road, a
+   tram street and a junction approach. Tracks show both ways.
+4. Clicks add exactly one waypoint each, in order, on the highlighted lane. Back
+   returns to the Line Manager with its state intact; hovering edits nothing.
+5. After moving a waypoint (no stretch selected), the panel's stretch matches where
+   the next native Shift-click lands.
+6. Ship and aircraft markers and rejections behave; gamepad focus on the stop list
+   still works; bridges, tunnels, slopes and UI scaling look right.
 
 ## Development checks
 
 ```sh
 lua5.4 tests/direction_test.lua
 lua5.4 tests/ui_contract_test.lua
+luajit tests/direction_test.lua
+luajit tests/ui_contract_test.lua
 python3 -m unittest discover -s tests -p '*_test.py'
 python3 scripts/package_release.py
 ```
 
-The UI contract test uses test doubles for native engine objects. To additionally
-exercise the shipped Lua React registry, set `TF3_REACT_LUA` to your own game's
-`gui/main/react.lua` extracted from `base/content/gui.zip`. Game source is not
-included in this repository or its packages. Offline checks do not validate the
-native C++ renderer or mod loader.
+The game embeds Lua 5.2.2. The Lua tests run on 5.4 and on LuaJIT (5.1-based), and
+`tests/lua_compat_test.py` rejects 5.3+ syntax and libraries as well as 5.1-only
+globals in runtime Lua. The UI contract test uses test doubles for native engine
+objects. To also exercise the shipped Lua React registry, set `TF3_REACT_LUA` to
+your own game's `gui/main/react.lua` extracted from `base/content/gui.zip`. Game
+source is not included in this repository or its packages. Offline checks do not
+validate the native C++ renderer, input handling or mod loader.
 
 ## Versioning and release tooling
 
@@ -66,7 +98,7 @@ Adapted from [Subsidy Manager](https://github.com/Ashcutus/Transport-Fever-3-Sub
 - `scripts/package_release.py` builds a deterministic runtime-only ZIP and SHA-256
   checksum. It never uploads or publishes anything.
 - Start each in-game upload changelog with `vMAJOR.MINOR.PATCH`, for example
-  `v0.1.0 — Experimental direction preview`.
+  `v0.2.0 — Placement tool for every line type`.
 - `scripts/set_modio_version.py` preserves Subsidy Manager's preview-first/manual
   confirmation, HTML changelog matching, file-ID validation, conflict protection,
   rechecks and post-write verification. It changes version labels only.

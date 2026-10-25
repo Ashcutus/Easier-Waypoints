@@ -6,6 +6,10 @@
   operator approval. Current UI integrations use `react-replacement-config`.
 - Preserve native routing and editing. Do not issue simulation commands while
   hovering or cancelling. Do not claim pathfinding equivalence from network search.
+  Commit line edits only through the Line Manager's own `commonParams` functions.
+- Never show a travel direction the lane data has not confirmed.
+- The game embeds Lua 5.2.2. Keep runtime Lua 5.2-compatible and run the Lua tests
+  under both `lua5.4` and `luajit`.
 - `VERSION` is the public semantic version. `mod/easier_waypoints_1/mod.json` uses
   an independent integer `revision`. Bump that revision exactly once for a PR that
   changes shipped mod files, including metadata; tooling-only PRs do not bump it.
