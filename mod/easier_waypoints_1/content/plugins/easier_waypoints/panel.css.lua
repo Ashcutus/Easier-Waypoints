@@ -32,6 +32,13 @@ function data()
     })
     a("R::EasierWaypointsStopItem !ew-waypoint-label", {
         margin = { 0, 0, 0, stopNameIndent },
+        size = { 232, -1 },
+        maxSize = { 232, -1 },
+    })
+    a("R::EasierWaypointsStopItem !ew-waypoint-label TextView", {
+        size = { 232, -1 },
+        maxSize = { 232, -1 },
+        textAutoWrap = false,
     })
     return result
 end

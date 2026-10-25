@@ -18,7 +18,7 @@ local backend = {
     end,
     sample = function(geometry, param)
         seenParam = param
-        return {{x = geometry.x, y = 200, z = 12}, {x = 0, y = 2 * geometry.dy, z = geometry.dy}}
+        return {{x = geometry.x, y = 200, z = geometry.z or 12}, {x = 0, y = 2 * geometry.dy, z = geometry.dy}}
     end,
     locate = function(geometry, position) return math.abs(geometry.x - position.x) < 25 and 0.5 or nil end,
 }
@@ -86,21 +86,52 @@ info = nil
 check(model.preview(waypoint, backend) == nil, "Deleted edge retains native behavior")
 check(model.preview({pos = {x = 1, y = 2, z = 3}}, backend) == nil, "Ship/aircraft waypoint is not a lane")
 
--- Route clicks: nearest lane the line can use, on the ground plane, within a limit.
+-- Route clicks: refuse ambiguous roads, sides and terrain/deck mismatches.
 local networks = {
     [7] = street({lane(-2, -1, car, true), lane(2, 1, car, true), lane(6, 1, walk, false)}, twoWay),
     [8] = {kind = "track", edges = {lane(3, 1, train, false)}},
 }
 backend.edgeInfo = function(entity) return networks[entity] end
-local nearest = model.nearestLane({x = 1.5, y = 200, z = 40}, {7, 8}, backend, {ROAD = true}, 8)
+local nearest = model.nearestLane({x = 1.5, y = 200, z = 12}, {7, 8}, backend, {ROAD = true}, 8)
 check(nearest and nearest.entity == 7 and nearest.index == 1 and nearest.param == 0.5,
-    "Nearest road lane wins, by ground distance even below a bridge")
-nearest = model.nearestLane({x = 3, y = 200, z = 0}, {7, 8}, backend, {RAIL = true}, 8)
+    "One plausible road chooses the nearest side without considering incompatible tracks")
+nearest = model.nearestLane({x = 3, y = 200, z = 12}, {7, 8}, backend, {RAIL = true}, 8)
 check(nearest and nearest.entity == 8 and nearest.index == 0, "Rail lines only consider tracks")
-check(model.nearestLane({x = 5.5, y = 200, z = 0}, {7}, backend, {ROAD = true}, 3) == nil, "Footpaths are never chosen")
-check(model.nearestLane({x = 1.5, y = 200, z = 0}, {7}, backend, {ROAD = true}, 0.25) == nil, "Too far from any lane")
+check(model.nearestLane({x = 5.5, y = 200, z = 12}, {7}, backend, {ROAD = true}, 3) == nil, "Footpaths are never chosen")
+check(model.nearestLane({x = 1.5, y = 200, z = 12}, {7}, backend, {ROAD = true}, 0.25) == nil, "Too far from any lane")
 check(model.nearestLane({x = 0/0, y = 0, z = 0}, {7}, backend, {ROAD = true}, 8) == nil, "Invalid cursor position")
 check(model.nearestLane({x = 1.5, y = 200, z = 0}, {}, backend, {ROAD = true}, 8) == nil, "No networks nearby")
+local reason
+nearest, reason = model.nearestLane({x = 0, y = 200, z = 12}, {7}, backend, {ROAD = true}, 8)
+check(nearest == nil and reason == "ambiguous", "Equidistant opposite lanes do not choose an arbitrary direction")
+nearest = model.nearestLane({x = 0.1, y = 200, z = 12}, {7}, backend, {ROAD = true}, 8)
+check(nearest and nearest.index == 1, "Moving off the middle still allows side selection on the same road")
+nearest = model.nearestLane({x = 1.5, y = 200, z = 9}, {7, 7}, backend, {ROAD = true}, 8)
+check(nearest and nearest.entity == 7, "Small terrain clearance and repeated search results stay usable")
+networks[9] = street({lane(4, 1, car, true)}, oneWay)
+nearest, reason = model.nearestLane({x = 1.5, y = 200, z = 12}, {7, 9}, backend, {ROAD = true}, 8)
+check(nearest == nil and reason == "ambiguous", "A nearby unrelated parallel road makes synthetic route picking ambiguous")
+nearest, reason = model.nearestLane({x = 1.5, y = 200, z = 12}, {9, 7}, backend, {ROAD = true}, 8)
+check(nearest == nil and reason == "ambiguous", "Ambiguity does not depend on octree result ordering")
+-- Even when two segments meet at a shared position, proximity is not evidence
+-- of which segment the route uses. Direct native lane picking handles this.
+networks[9].edges[1].geometry.x = 2
+nearest, reason = model.nearestLane({x = 2, y = 200, z = 12}, {7, 9}, backend, {ROAD = true}, 8)
+check(nearest == nil and reason == "ambiguous", "Adjacent road segments near their join also require a native lane pick")
+networks[10] = street({lane(2, 1, car, true)}, oneWay)
+networks[10].edges[1].geometry.z = 24
+nearest, reason = model.nearestLane({x = 1.5, y = 200, z = 12}, {7, 10}, backend, {ROAD = true}, 8)
+check(nearest == nil and reason == "elevation", "A bridge over a ground road cannot silently select the lower road")
+nearest, reason = model.nearestLane({x = 1.5, y = 200, z = 12}, {10, 7}, backend, {ROAD = true}, 8)
+check(nearest == nil and reason == "elevation", "Stacked roads are rejected whichever road the octree lists first")
+nearest, reason = model.nearestLane({x = 1.5, y = 200, z = 12}, {10}, backend, {ROAD = true}, 8)
+check(nearest == nil and reason == "elevation", "A route above the terrain needs a native lane pick")
+networks[10].edges[1].geometry.z = 0
+nearest, reason = model.nearestLane({x = 1.5, y = 200, z = 12}, {10}, backend, {ROAD = true}, 8)
+check(nearest == nil and reason == "elevation", "A tunnel below the terrain needs a native lane pick")
+networks[10].edges[1].geometry.x = 20
+nearest = model.nearestLane({x = 1.5, y = 200, z = 12}, {7, 10}, backend, {ROAD = true}, 8)
+check(nearest and nearest.entity == 7, "An elevated road outside the pick radius does not block the intended road")
 
 check(model.compass({x = 0, y = 1, z = 0}) == "north" and model.compass({x = 1, y = 0.2, z = 0}) == "east",
     "Compass: +y north, +x east")

@@ -85,27 +85,51 @@ function M.compatible(lineCarriers, laneCarriers)
     return false
 end
 
--- Closest lane the line's vehicles can use, measured on the ground plane.
--- Returns {entity, index (zero-based), param} or nil beyond maxDistance.
+-- A terrain pick cannot identify which road a drawn route uses. Only resolve it
+-- when one base edge is plausible, its nearest lane is distinct, and all nearby
+-- compatible lanes are close to the terrain height. The 4 m clearance is a
+-- conservative rejection guard, not evidence that a lane belongs to the route.
+-- Native lane picks remain available where this synthetic pick is ambiguous.
+local ROUTE_HEIGHT_CLEARANCE = 4
+local LANE_TIE_DISTANCE = 0.05
+
+-- Returns {entity, index (zero-based), param}, or nil with an optional reason.
 function M.nearestLane(position, entities, backend, lineCarriers, maxDistance)
     local p = xyz(position)
     if not p then return nil end
-    local best, bestDistance
+    local best, bestDistance, secondDistance, candidateEntity
+    local multipleEntities, elevated = false, false
+    local visited = {}
     for _, entity in ipairs(entities) do
-        local info = backend.edgeInfo(entity)
-        for index, edge in ipairs(info and info.edges or {}) do
-            if edge.geometry and M.compatible(lineCarriers, backend.laneCarriers(edge.transportModes)) then
-                local param = backend.locate(edge.geometry, p)
-                local sample = param and backend.sample(edge.geometry, param)
-                local point = sample and xyz(sample[1])
-                if point then
-                    local distance = math.sqrt((point.x - p.x) ^ 2 + (point.y - p.y) ^ 2)
-                    if distance <= maxDistance and (not best or distance < bestDistance) then
-                        best, bestDistance = {entity = entity, index = index - 1, param = param}, distance
+        if not visited[entity] then
+            visited[entity] = true
+            local info = backend.edgeInfo(entity)
+            for index, edge in ipairs(info and info.edges or {}) do
+                if edge.geometry and M.compatible(lineCarriers, backend.laneCarriers(edge.transportModes)) then
+                    local param = backend.locate(edge.geometry, p)
+                    local sample = param and backend.sample(edge.geometry, param)
+                    local point = sample and xyz(sample[1])
+                    if point then
+                        local distance = math.sqrt((point.x - p.x) ^ 2 + (point.y - p.y) ^ 2)
+                        if distance <= maxDistance then
+                            if math.abs(point.z - p.z) > ROUTE_HEIGHT_CLEARANCE then elevated = true end
+                            if candidateEntity and candidateEntity ~= entity then multipleEntities = true end
+                            candidateEntity = entity
+                            if not best or distance < bestDistance then
+                                secondDistance = bestDistance
+                                best, bestDistance = {entity = entity, index = index - 1, param = param}, distance
+                            elseif not secondDistance or distance < secondDistance then
+                                secondDistance = distance
+                            end
+                        end
                     end
                 end
             end
         end
+    end
+    if elevated then return nil, "elevation" end
+    if multipleEntities or (secondDistance and secondDistance - bestDistance <= LANE_TIE_DISTANCE) then
+        return nil, "ambiguous"
     end
     return best
 end

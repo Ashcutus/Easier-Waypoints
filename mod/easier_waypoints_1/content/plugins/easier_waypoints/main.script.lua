@@ -4,6 +4,7 @@ local buttons = ug_require "::/gui/main/button_react_util.tl"
 local tooltips = ug_require "::/gui/line_vehicle_mgmt/manager_tooltips_util.tl"
 local nativePanel = ug_require "::/gui/line_vehicle_mgmt/line_manager_panel.tl"
 local lineUtil = ug_require "::/gui/line_vehicle_mgmt/line_util.tl"
+local appUtil = ug_require "::/scripts/app_util.tl"
 local game = ug_require "easier_waypoints::/plugins/easier_waypoints/game.lua"
 local placement = ug_require "easier_waypoints::/plugins/easier_waypoints/placement.lua"
 
@@ -25,29 +26,60 @@ end)
 
 local WAYPOINT_ICON = "::/gui/construction/menu/menu_categories/category_waypoints.tga"
 
--- Only while a line is being edited; the stretch lives in the tooltip so the
--- panel keeps a single compact row. Plain data first, nodes afterwards.
+local function finishHint()
+    if appUtil.isGamepadInputMode() then return _("Use Back when you're done.") end
+    return _("Right-click or press Esc when you're done.")
+end
+
+-- Keep Finish available while the placement tool is active, including when a
+-- native panel action changes the editing mode. The stretch stays in the tooltip.
 local function panelState(common)
+    if placement.isActive(common) then
+        return {active = true, enabled = true,
+            tooltip = _("Finish placing waypoints and return to normal line editing.") .. "\n" .. finishHint()}
+    end
     local line = common.lineState and common.lineState:old()
     local mode = common.getModeState()
     if not line or not line.path or not mode or mode[1] ~= "SEGMENT" then return nil end
     -- One literal per message so translation extraction can find it.
-    local text = game.stretchText(line, mode[2],
-        _("Add waypoints between {from} and {to}.\nYou'll see the lane and its direction before you click.\nClick the route to switch to another part of the line.\nRight-click or press Esc when you're done."))
+    local text = game.stretchText(line, mode[2], _("Add waypoints between {from} and {to}."))
     if not text then return {enabled = false, tooltip = _("Select a stretch of the line first.")} end
-    return {enabled = true, tooltip = text}
+    local carriers = game.lineCarriers(lineUtil.getLineCarriers(line))
+    local guidance = (carriers.WATER or carriers.AIR) and _("Preview the point before you click.")
+        or _("Preview the lane and any confirmed direction before you click.\nClick the route to add a waypoint to that part of the line.")
+    return {enabled = true, tooltip = text .. "\n" .. guidance .. "\n" .. finishHint()}
+end
+
+local function readPanelState(common)
+    local ok, state = pcall(panelState, common)
+    if not ok then game.warnOnce("waypoint button state unavailable", state); return nil end
+    return state
+end
+
+local function samePanelState(a, b)
+    if not a or not b then return a == b end
+    return a.active == b.active and a.enabled == b.enabled and a.tooltip == b.tooltip
 end
 
 local Panel = react.RegisterRecipe("EasierWaypointsPanel", function(params)
     local children = {}
-    local ok, state = pcall(panelState, params.commonParams)
-    if ok and state then
+    local stateHook = react.useState(readPanelState(params.commonParams))
+    react.onStep(function()
+        if stateHook.hasExpired and stateHook:hasExpired() then return end
+        local nextState = readPanelState(params.commonParams)
+        if not samePanelState(stateHook:old(), nextState) then stateHook:set(nextState) end
+    end)
+    local state = stateHook:old()
+    if state then
         children[#children + 1] = builtin.Component {
             meta = {class = "ew-waypoint-row"},
             layout = builtin.BoxLayout {
                 orientation = builtin.type.Orientation.Horizontal,
-                children = {buttons.makeIconTextButton("secondary, ew-add-waypoint", WAYPOINT_ICON, _("Add Waypoint"),
-                    function() placement.start(params.commonParams) end, state.tooltip, state.enabled, nil,
+                children = {buttons.makeIconTextButton("secondary, ew-add-waypoint", WAYPOINT_ICON,
+                    state.active and _("Finish Waypoints") or _("Add Waypoint"), function()
+                        if placement.isActive(params.commonParams) then placement.finish(params.commonParams)
+                        else placement.start(params.commonParams) end
+                    end, state.tooltip, state.enabled, nil,
                     "font-scale-annotation")},
             },
         }
@@ -71,17 +103,35 @@ local function rowLabel(params)
     return game.waypointLabel(via.waypoint, game.lineCarriers(line and lineUtil.getLineCarriers(line)))
 end
 
-local StopRow = react.RegisterRecipe("EasierWaypointsStopItem", function(params)
-    local native = originalRow(params)
+local function readRowLabel(params)
     local ok, label = pcall(rowLabel, params)
-    if not ok then game.warnOnce("stop row label failed", label) end
+    if not ok then
+        game.warnOnce("stop row label failed", label)
+        return nil
+    end
+    return label
+end
+
+local StopRow = react.RegisterRecipe("EasierWaypointsStopItem", function(params)
+    -- Native rows update themselves independently; poll here too so a road rename
+    -- or lane revision updates this wrapper without waiting for new row params.
+    local labelState = react.useState(readRowLabel(params))
+    react.onStep(function()
+        if labelState.hasExpired and labelState:hasExpired() then return end
+        local nextLabel = readRowLabel(params)
+        if labelState:old() ~= nextLabel then labelState:set(nextLabel) end
+    end)
+    local native = originalRow(params)
+    local label = labelState:old()
     -- Stop rows are returned untouched so their layout is exactly native.
-    if not ok or not label then return native end
+    if not label then return native end
     return builtin.FloatingLayout {meta = {class = "ew-waypoint-row-layout"}, children = {
         builtin.FloatingLayoutChild {h = -1, v = -1, item = native},
         builtin.FloatingLayoutChild {h = 0, v = 0.5, item = builtin.Component {
             meta = {class = "ew-waypoint-label", mouseTransparent = true},
-            layout = builtin.BoxLayout {children = {builtin.TextView {meta = {class = "font-scale-body"}, text = label}}},
+            layout = builtin.BoxLayout {children = {builtin.TextView {
+                meta = {class = "font-scale-body"}, text = label, tooltipWhenClipped = label,
+            }}},
         }},
     }}
 end)

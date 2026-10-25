@@ -12,13 +12,45 @@ local M = {}
 local NAME = "EasierWaypointsPlacement"
 local ROUTE_SEARCH_RADIUS = 20
 local ROUTE_LANE_DISTANCE = 8
-local ROUTE_FOLLOW_DISTANCE = 0.75
 local CLICK_SLOP = 4 -- pixels a right click may move before it counts as a camera drag
 local MANAGER_WINDOW = "menu.management"
+local activeSession
+
+local function finishSession(param)
+    if not param or param.closed then return false end
+    param.closed = true
+    if activeSession == param then activeSession = nil end
+    param.ctx.popSelf()
+    return true
+end
 
 local function append(list, item)
     if item ~= nil then list[#list + 1] = item end
     return list
+end
+
+local function pathKey(path)
+    local parts = {}
+    for _, via in ipairs(path) do
+        local stop, waypoint = via.stop, via.waypoint
+        if stop then
+            parts[#parts + 1] = "s:" .. tostring(stop.stationGroup) .. ":" .. tostring(stop.station1) .. ":" .. tostring(stop.terminal1)
+        elseif waypoint then
+            local snap, pos = waypoint.edgePos, waypoint.pos
+            parts[#parts + 1] = "w:" .. tostring(waypoint.tag)
+                .. (snap and (":" .. tostring(snap.edgeId.entity) .. ":" .. tostring(snap.edgeId.index) .. ":" .. tostring(snap.param)) or "")
+                .. (pos and (":" .. tostring(pos.x) .. ":" .. tostring(pos.y) .. ":" .. tostring(pos.z)) or "")
+        end
+    end
+    return table.concat(parts, "|")
+end
+
+local function edgeRevision(snap)
+    if not snap or not api.engine.getRevision then return nil end
+    local ok, revision = pcall(api.engine.getRevision, snap.edgeId.entity)
+    if not ok then return false end
+    local num = revision and revision.num
+    return num and (tostring(num[1]) .. ":" .. tostring(num[2]) .. ":" .. tostring(num[3])) or nil
 end
 
 -- Line and mode are read live: native addWaypoint advances the selected stretch,
@@ -33,7 +65,7 @@ local function session(param)
     local filters = common.gameCtx and common.gameCtx.filters and common.gameCtx.filters:get()
     local protectedEntities = filters and filters.protectedEntities
     return {
-        common = common, line = line, lineEntity = param.line, mode = mode[2],
+        common = common, line = line, lineEntity = param.line, mode = mode[2], pathKey = pathKey(line.path),
         after = game.stretch(line, mode[2]),
         carriers = carriers, points = carriers.WATER or carriers.AIR,
         protected = protectedEntities and lineUtil.isStopProtected(param.line, nil, protectedEntities) or false,
@@ -64,11 +96,14 @@ local function routeTarget(picked, state)
     local after = game.stretch(state.line, picked.stopNumber)
     if not after then return nil end
     local position = game.backend.cursorPosition()
-    local lane = position and direction.nearestLane(position, game.backend.edgesNear(position, ROUTE_SEARCH_RADIUS),
-        game.backend, state.carriers, ROUTE_LANE_DISTANCE)
-    local aim = {route = true, after = after, picked = picked, cursor = position}
+    local lane, problem
+    if position then
+        lane, problem = direction.nearestLane(position, game.backend.edgesNear(position, ROUTE_SEARCH_RADIUS),
+            game.backend, state.carriers, ROUTE_LANE_DISTANCE)
+    end
+    local aim = {route = true, after = after, picked = picked, cursor = position, pathKey = state.pathKey, problem = problem}
     if not lane then
-        aim.key = "route:" .. tostring(after) .. ":none"
+        aim.key = "route:" .. tostring(after) .. ":" .. (problem or "none")
         return aim
     end
     local built, snap = pcall(makeSnap, lane)
@@ -79,13 +114,21 @@ local function routeTarget(picked, state)
         return aim
     end
     aim.snap = snap
+    aim.edgeRevision = edgeRevision(snap)
     aim.key = "route:" .. tostring(after) .. ":" .. laneKey(snap)
     return aim
 end
 
 local function moved(from, to)
     if not from or not to then return from ~= to end
-    return (from.x - to.x) ^ 2 + (from.y - to.y) ^ 2 > ROUTE_FOLLOW_DISTANCE ^ 2
+    return from.x ~= to.x or from.y ~= to.y or from.z ~= to.z
+end
+
+local function fresh(aim, state)
+    if not aim or not state or aim.pathKey ~= state.pathKey then return false end
+    if not aim.route and aim.mode ~= state.mode then return false end
+    if aim.snap and (aim.edgeRevision == false or not api.engine.entityExists(aim.snap.edgeId.entity)) then return false end
+    return not aim.edgeRevision or aim.edgeRevision == edgeRevision(aim.snap)
 end
 
 local function target(details, state)
@@ -93,11 +136,12 @@ local function target(details, state)
     if details.line then return routeTarget(details.line, state) end
     if details.transportNetworkEdge then
         local snap = details.transportNetworkEdge.snap
-        return {snap = snap, key = "lane:" .. laneKey(snap)}
+        return {snap = snap, key = "lane:" .. laneKey(snap), pathKey = state.pathKey,
+            mode = state.mode, edgeRevision = edgeRevision(snap)}
     end
     if details.world then
         local pos = details.world.pos
-        return {pos = pos, water = details.world.water,
+        return {pos = pos, water = details.world.water, pathKey = state.pathKey, mode = state.mode,
             key = string.format("point:%.1f:%.1f:%.1f:", pos.x, pos.y, pos.z) .. tostring(details.world.water)}
     end
     return nil
@@ -105,6 +149,7 @@ end
 
 local function evaluate(state, aim)
     if not state or not aim then return nil end
+    if not fresh(aim, state) then return {problem = _("The line or lane changed. Point at the target again before placing a waypoint.")} end
     local candidate
     if state.points then
         if not aim.pos then return nil end
@@ -116,6 +161,10 @@ local function evaluate(state, aim)
         elseif lineUtil.isWaypointTooClose(state.line, aim.pos, nil) then
             candidate.problem = _("Too close to another waypoint.")
         end
+    elseif aim.problem == "ambiguous" then
+        candidate = {route = true, problem = _("More than one lane could match this route. Pick the road or track directly, or finish and use the game's waypoint key.")}
+    elseif aim.problem == "elevation" then
+        candidate = {route = true, problem = _("The route is above or below the ground here. Pick the road or track directly, or finish and use the game's waypoint key.")}
     elseif aim.unbuildable then
         candidate = {route = true, problem = _("Clicking the route isn't available in this game version. Point at the road or track itself.")}
     elseif aim.route and not aim.snap then
@@ -170,7 +219,9 @@ end
 -- candidate should have an overlay but none could be built.
 local function tooltipParam(state, aim, candidate, drawn, arrowsBuilt)
     if not state then
-        return {problem = _("This line is no longer being edited. Right-click or press Esc to finish.")}
+        return {problem = appUtil.isGamepadInputMode()
+            and _("This line is no longer being edited. Press Back or use Finish Waypoints.")
+            or _("This line is no longer being edited. Right-click, press Esc or use Finish Waypoints.")}
     end
     if not candidate then return nil end
     if candidate.problem then return {problem = candidate.problem} end
@@ -259,11 +310,25 @@ local function action(param, ctx)
     local state = session(param)
     local aim = aimState:old()
     local candidate = evaluate(state, aim)
+    param.displayedAim = candidate and not candidate.problem and aim or nil
+
+    local function invalidate()
+        param.displayedAim, param.pendingAim, param.aimInvalid = nil, nil, true
+        aimState:set(nil)
+    end
+
+    local function updateAim(nextAim)
+        local old = aimState:old()
+        param.pendingAim, param.aimInvalid = nextAim, false
+        local same = old and nextAim and old.key == nextAim.key and old.pathKey == nextAim.pathKey
+            and old.mode == nextAim.mode and old.edgeRevision == nextAim.edgeRevision
+            and (not old.snap or old.snap.param == nextAim.snap.param)
+            and (not old.pos or (old.pos.x == nextAim.pos.x and old.pos.y == nextAim.pos.y and old.pos.z == nextAim.pos.z))
+        if same then old.cursor = nextAim.cursor else aimState:set(nextAim) end
+    end
 
     local function close()
-        if param.closed then return end
-        param.closed = true
-        ctx.popSelf()
+        finishSession(param)
     end
     -- Engine callbacks must never raise: an error repeats every frame. After the
     -- tool closes its state expires, so callbacks then do nothing.
@@ -272,31 +337,66 @@ local function action(param, ctx)
             if param.closed or (aimState.hasExpired and aimState:hasExpired()) then return fallback end
             local ok, result = pcall(fn, ...)
             if ok then return result end
+            invalidate()
             game.warnOnce("placement " .. name .. " failed", result)
             return fallback
         end
     end
     local function hover(entity, _indices, details)
-        local hovered = target(convert(entity, details), session(param))
-        local old = aimState:old()
-        if (hovered and hovered.key) ~= (old and old.key) then aimState:set(hovered) end
+        updateAim(target(convert(entity, details), session(param)))
     end
+
+    local function accept(chosen, live)
+        local shown = param.displayedAim
+        if not chosen then
+            invalidate()
+            return false
+        end
+        if not shown or param.aimInvalid then updateAim(chosen); return false end
+        if not fresh(shown, live) then invalidate(); return false end
+        local matches = chosen.route == shown.route and stretchMode(live, chosen) == stretchMode(live, shown)
+        if chosen.snap and shown.snap then
+            matches = matches and chosen.snap.edgeId.entity == shown.snap.edgeId.entity
+                and chosen.snap.edgeId.index == shown.snap.edgeId.index
+        else
+            matches = matches and chosen.key == shown.key
+        end
+        if not matches or not fresh(chosen, live) then
+            param.displayedAim = nil
+            updateAim(chosen) -- show the changed target before a later click may accept it
+            return false
+        end
+        -- Commit the displayed snap, never a newly resolved but unseen lane.
+        local placed = place(param, shown)
+        if placed then invalidate() end
+        return placed
+    end
+
     local function choose(entity, _indices, details)
-        local chosen = target(convert(entity, details), session(param))
-        return chosen ~= nil and place(param, chosen)
+        local live = session(param)
+        return accept(target(convert(entity, details), live), live)
     end
     -- A right click finishes; a right drag still belongs to the camera.
     local function mouse(evt)
-        if evt.button ~= 2 then return false end
         local types = api.gui.mouse.Event.Type
-        if evt.type == types.Pressed then
-            param.rightPress = {evt.x, evt.y}
+        local press = param.rightPress
+        if evt.type == types.Moved then
+            if press and (math.abs(evt.x - press[1]) > CLICK_SLOP or math.abs(evt.y - press[2]) > CLICK_SLOP) then
+                param.rightDragged = true
+            end
             return false
         end
-        local press = param.rightPress
+        if evt.button ~= 2 then return false end
+        if evt.type == types.Pressed then
+            param.rightPress, param.rightDragged = {evt.x, evt.y}, false
+            return false
+        end
         local still = press and math.abs(evt.x - press[1]) <= CLICK_SLOP and math.abs(evt.y - press[2]) <= CLICK_SLOP
+        if press and not still then param.rightDragged = true end
+        local clicked = not param.rightDragged and ((evt.type == types.Released and still)
+            or (evt.type == types.Clicked and (not press or still)))
         if evt.type == types.Released then param.rightPress = nil end
-        if evt.type == types.Clicked or (evt.type == types.Released and still) then
+        if clicked then
             close()
             return true
         end
@@ -312,16 +412,11 @@ local function action(param, ctx)
             api.gui.byId.setVisible(MANAGER_WINDOW, true)
         end
         local current = aimState:old()
-        if not current or not current.route then return end
-        if not moved(current.cursor, game.backend.cursorPosition()) then return end
         local live = session(param)
-        local followed = live and routeTarget(current.picked, live)
-        if not followed then return end
-        if followed.key ~= current.key then
-            aimState:set(followed)
-        else
-            current.cursor = followed.cursor -- same lane: remember where the search ran, no re-render
-        end
+        if current and not fresh(current, live) then invalidate(); return end
+        if param.aimInvalid or not current or not current.route then return end
+        if not moved(current.cursor, game.backend.cursorPosition()) then return end
+        updateAim(routeTarget(current.picked, live))
     end))
 
     local enabled = function() return true end
@@ -329,9 +424,14 @@ local function action(param, ctx)
     react.useInputAction("IA_CLOSE_TOPMOST_WINDOW", react.iaHandler(close, enabled, _("Finish")))
     react.useInputAction("IA_MENU_BACK", react.iaHandler(close, enabled, _("Finish")))
     react.useInputAction("IA_SELECT", react.iaHandler(guarded("select", function()
-        local current = aimState:old()
-        if current then place(param, current) end
-    end), function() return candidate ~= nil and not candidate.problem end, _("Add Waypoint")))
+        local live, shown = session(param), param.displayedAim
+        if not shown then return end
+        if not fresh(shown, live) then invalidate(); return end
+        local chosen = shown.route and routeTarget(shown.picked, live) or param.pendingAim
+        accept(chosen, live)
+    end), guarded("select availability", function()
+        return not param.aimInvalid and param.displayedAim ~= nil and fresh(param.displayedAim, session(param))
+    end, false), _("Add Waypoint")))
 
     local children = {}
     append(children, lineViewer(param, state, aim, candidate))
@@ -358,13 +458,27 @@ end
 M.Tool = react.RegisterTool {
     name = NAME,
     push = function(ctx, param)
+        param.ctx = ctx
+        activeSession = param
         ctx.setActionFn(function() return action(param, ctx) end, NAME)
     end,
     pop = function(_ctx, param)
         param.closed = true
+        if activeSession == param then activeSession = nil end
     end,
     shelve = function() end,
 }
+
+function M.isActive(common)
+    if not activeSession or activeSession.closed or activeSession.commonParams ~= common then return false end
+    local stack = common.gameCtx and common.gameCtx.toolStack and common.gameCtx.toolStack:get()
+    local toolStack = stack and stack:getApi()
+    return toolStack ~= nil and toolStack.getActiveTool ~= nil and toolStack.getActiveTool() == M.Tool
+end
+
+function M.finish(common)
+    return M.isActive(common) and finishSession(activeSession) or false
+end
 
 -- Offered from the stop panel; the Line Manager stays open underneath.
 function M.start(common)

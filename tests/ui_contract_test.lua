@@ -18,6 +18,7 @@ local entities = {
 }
 local exists = true
 local cursor -- ground point under the mouse, or nil
+local gamepad = false
 local shownWindows, soundSets, sounds = {}, {}, {}
 -- Private stop-row recipe as the game's React registry holds it.
 local recipeIdFor = function(name) return name == "LineStopItem" and 501 or 999 end
@@ -39,13 +40,14 @@ local api = {
         EdgePos = {new = function() return {} end},
         StationTerminal = {new = function(s, t) return {station = s, terminal = t} end}},
     engine = {entityExists = function(entity) return exists and entities[entity] ~= nil end,
+        getRevision = function(entity) return (entities[entity] or {}).revision or {num = {1, 1, 1}} end,
         getComponent = function(entity, component)
             local e = entities[entity] or {}
             return ({network = e.network, base = e.base, street = e.street, world = e.world})[component]
         end,
         util = {getEntityName = function(entity) return entities[entity] and entities[entity].name end,
             -- Lanes run along y through y = 20 at t = 0.5, in the direction of dy.
-            transport = {calcPosition = function(g, t) return {x = g.x, y = 20 + (t - 0.5) * 4 * g.dy, z = 3} end},
+            transport = {calcPosition = function(g, t) return {x = g.x, y = 20 + (t - 0.5) * 4 * g.dy, z = g.z or 3} end},
             octree = {findEntitiesInCircle = function(center, radius, component)
                 assert(component == "base" and radius > 0, "Search street and track edges")
                 edgeQueries = edgeQueries + 1
@@ -60,7 +62,7 @@ local api = {
         react = {detail = {makeRecipeId = function(name) return recipeIdFor(name) end}},
         byId = {setVisible = function(id, visible) shownWindows[#shownWindows + 1] = {id, visible} end},
         mouse = {hasTerrainPosition = function() return cursor ~= nil end, getTerrainPosition = function() return cursor end,
-            Event = {Type = {Pressed = "pressed", Released = "released", Clicked = "clicked"}}},
+            Event = {Type = {Pressed = "pressed", Released = "released", Clicked = "clicked", Moved = "moved"}}},
         genericRep = {find = function(path) soundSets[#soundSets + 1] = path; return path end,
             get = function(path) return {data = {AddWaypoint = {"bell.wav"}, ButtonClick = {"click.wav"}}} end},
         sound = {playRandomSoundEffect = function(sound) sounds[#sounds + 1] = sound[1] end}},
@@ -119,7 +121,7 @@ local function environment(reactApi, builtins, tips, panel, buttonApi, store)
     local doubles = {
         ["/react.lua"] = reactApi, ["/builtin.lua"] = builtins, ["manager_tooltips_util.tl"] = tips,
         ["line_manager_panel.tl"] = panel, ["button_react_util.tl"] = buttonApi, ["/line_util.tl"] = lineUtil,
-        ["lang_util.tl"] = langUtil, ["app_util.tl"] = {isGamepadInputMode = function() return false end},
+        ["lang_util.tl"] = langUtil, ["app_util.tl"] = {isGamepadInputMode = function() return gamepad end},
         ["hud_react_util.tl"] = {makeDefaultLineViewerSnapFactors = function() return {view = 0.05, world = 10} end},
     }
     env = setmetatable({api = api, log = log, _react = store, _ = function(text) return text end, ug_require = function(path)
@@ -179,10 +181,18 @@ local rowPath = {{stop = {stationGroup = 10}},
     {waypoint = {edgePos = {edgeId = {entity = 2, index = 0}, param = 0.5}}},
     {waypoint = {pos = vec(1, 2, 0)}}}
 local rowLine = {carriers = {road = true}}
+local rowHooks, rowSteps = {}, {}
 local function row(n, carriers)
     rowLine.carriers = carriers or {road = true}
-    return StopRow.fn({stopNumber = n, viaState = {old = function() return rowPath end},
+    local savedHooks, savedIndex, savedStep = hooks, hookIndex, stepFn
+    rowHooks[n] = rowHooks[n] or {}
+    hooks, hookIndex = rowHooks[n], 0
+    if rowSteps[n] then rowSteps[n]() end
+    local view = StopRow.fn({stopNumber = n, viaState = {old = function() return rowPath end},
         commonParams = {lineState = {old = function() return rowLine end}}})
+    rowSteps[n] = stepFn
+    hooks, hookIndex, stepFn = savedHooks, savedIndex, savedStep
+    return view
 end
 local function rowText(r) return r.children[2].item.layout.children[1].text end
 assert(row(1).kind == "nativeRow", "Stop rows are returned untouched")
@@ -193,6 +203,11 @@ assert(rowText(waypointRow) == "Waypoint - Ring Road - heading north", "Road and
 assert(rowText(row(3)) == "Waypoint - Ring Road - heading south", "The other side of the road heads the other way")
 assert(rowText(row(4)) == "Waypoint - either direction", "Tracks")
 assert(rowText(row(5, {water = true})) == "Waypoint - at sea" and rowText(row(5, {air = true})) == "Waypoint - in the air")
+assert(waypointRow.children[2].item.layout.children[1].tooltipWhenClipped == rowText(waypointRow),
+    "The full waypoint label is available when clipped")
+entities[1].name = "Renamed Road"
+rowSteps[2]()
+assert(rowText(row(2)) == "Waypoint - Renamed Road - heading north", "Labels refresh without replacing the row parameters")
 entities[1].name = nil
 
 -- Stop panel: one compact waypoint button; the stretch native addWaypoint will edit is in its tooltip.
@@ -246,37 +261,59 @@ local common = {
 }
 local params = {commonParams = common}
 local normalPath = line.path
+-- Panel and tool recipes own separate hook storage and step callbacks.
+local panelHooks, panelStep = {}, nil
+local function panel()
+    local savedHooks, savedIndex, savedStep = hooks, hookIndex, stepFn
+    hooks, hookIndex = panelHooks, 0
+    if panelStep then panelStep() end
+    local view = replacements[nativePanel].fn(params)
+    panelStep = stepFn
+    hooks, hookIndex, stepFn = savedHooks, savedIndex, savedStep
+    return view
+end
+
 local function waypointButton(panel)
     local row = panel.children[1]
     assert(row.kind == "component" and row.meta.class == "ew-waypoint-row", "One compact row above the stop list")
     return row.layout.children[1]
 end
-result = replacements[nativePanel].fn(params)
+result = panel()
 assert(#result.children == 2 and result.children[2].recipe == nativePanel and result.children[2].param == params)
 local button = waypointButton(result)
 assert(button.text == "Add Waypoint" and button.class:find("ew-add-waypoint", 1, true) and button.class:find("secondary", 1, true))
 assert(button.icon:find("category_waypoints", 1, true) and button.textClass == "font-scale-annotation", "Small native waypoint button")
 assert(button.enabled and button.tooltip:find("between Station 10 and Station 20", 1, true), "The stretch lives in the tooltip")
+assert(button.tooltip:find("Click the route to add a waypoint", 1, true)
+    and not button.tooltip:find("switch to another", 1, true), "Route instructions explain the immediate edit")
 for _, child in ipairs(result.children) do assert(child.kind ~= "text", "No permanent text block in the panel") end
 mode = {"SEGMENT", nil}
 line.path = {{stop = {stationGroup = 20}}, {waypoint = {}}, {stop = {stationGroup = 10}}}
-assert(waypointButton(replacements[nativePanel].fn(params)).tooltip:find("between Station 20 and Station 10", 1, true),
+assert(waypointButton(panel()).tooltip:find("between Station 20 and Station 10", 1, true),
     "No stretch selected: name where native addWaypoint inserts (before the last entry)")
 line.path = normalPath
 mode = {"SEGMENT", -1}
-button = waypointButton(replacements[nativePanel].fn(params))
+button = waypointButton(panel())
 assert(button.enabled == false and button.tooltip:find("Select a stretch", 1, true), "Visible but disabled without a stretch")
 mode = {"MOVE_WAYPOINT", {}}
-assert(#replacements[nativePanel].fn(params).children == 1, "Moving a waypoint: native panel only")
+assert(#panel().children == 1, "Moving a waypoint: native panel only")
 mode = {"MOVE_STOP", {}}
-assert(#replacements[nativePanel].fn(params).children == 1, "Other modes only show the native panel")
+assert(#panel().children == 1, "Other modes only show the native panel")
 line.carriers = {rail = true}
 mode = {"SEGMENT", 1}
-assert(waypointButton(replacements[nativePanel].fn(params)).enabled, "Rail lines get the button too")
+assert(waypointButton(panel()).enabled, "Rail lines get the button too")
 line.carriers = {road = true}
 common.lineState = nil
-assert(#replacements[nativePanel].fn(params).children == 1, "No line state: native panel only")
+assert(#panel().children == 1, "No line state: native panel only")
 common.lineState = {old = function() return line end}
+line.carriers = {water = true}
+button = waypointButton(panel())
+assert(button.tooltip:find("Preview the point", 1, true) and not button.tooltip:find("Click the route", 1, true),
+    "Point lines are not promised a lane or route pick")
+gamepad = true
+button = waypointButton(panel())
+assert(button.tooltip:find("Back", 1, true) and not button.tooltip:find("Esc", 1, true), "Gamepad exit instructions")
+gamepad, line.carriers = false, {road = true}
 
 -- Placement tool: hover only reads; each click commits once through native addWaypoint.
 local function render()
@@ -286,10 +323,12 @@ local function render()
     return descriptor, find(descriptor.children, "selector"), find(descriptor.children, "tooltip")
 end
 mode = {"SEGMENT", nil} -- the Line Manager's state after a waypoint was moved
-waypointButton(replacements[nativePanel].fn(params)).onClick()
+waypointButton(panel()).onClick()
 assert(pushed == 1 and actionFn and manager.shelved, "Button pushes the placement tool over the shelved Line Manager")
-waypointButton(replacements[nativePanel].fn(params)).onClick()
-assert(pushed == 1, "A second click while placing does not stack another tool")
+local placingButton = waypointButton(panel())
+assert(placingButton.text == "Finish Waypoints" and placingButton.enabled, "Active mode has a visible Finish action")
+assert(env.ug_require("easier_waypoints::/plugins/easier_waypoints/placement.lua").start(common) == false
+    and pushed == 1, "Calling start again never stacks another placement tool")
 local descriptor, selector, tooltip = render()
 assert(selector.lineViewerSupport and find(descriptor.children, "lineViewer").preferLineOverTransportNetworkEdge == true,
     "Lane lines pick the drawn route first, so it can be clicked")
@@ -305,7 +344,9 @@ for i, param in ipairs({0.2, 0.5, 0.8}) do
     assert(tooltip.param.stretch == "Between Station 10 and Station 20" and not tooltip.param.detail and not tooltip.param.problem,
         "A confirmed direction needs only the leg; the arrow shows the rest")
     assert(find(descriptor.children, "lineViewer").snapPreview.snap == snaps[i])
-    assert(selector.onSelect(1, {}, {transportNetworkEdge = {snap = snaps[i]}}) == true)
+    local clickedSnap = i == 1 and {edgeId = {entity = 1, index = 1}, param = 0.201} or snaps[i]
+    assert(selector.onSelect(1, {}, {transportNetworkEdge = {snap = clickedSnap}}) == true)
+    assert(added[i].waypoint.edgePos == snaps[i], "The committed snap is the one actually displayed")
     inputActions.IA_SELECT.fn()
     assert(#added == i, "One native add per click")
     descriptor, selector, tooltip = render()
@@ -334,7 +375,7 @@ cursor = vec(1.9, 20, 0)
 stepFn()
 assert(#shownWindows == 1 and shownWindows[1][1] == "menu.management" and shownWindows[1][2] == true,
     "The Line Manager stays visible while placing, set once")
-assert(edgeQueries == queries, "Small cursor jitter does not search again")
+assert(edgeQueries == queries + 1, "Even small movements re-evaluate the lane rather than retaining another side")
 cursor = vec(-1.5, 20, 0)
 stepFn()
 descriptor, selector, tooltip = render()
@@ -345,6 +386,31 @@ cursor = vec(1.5, 20, 0)
 stepFn()
 descriptor, selector, tooltip = render()
 assert(find(descriptor.children, "lineViewer").snapPreview.snap.edgeId.index == 1, "And back again")
+-- Tiny cross-center movements must not accept a lane different from the preview.
+cursor = vec(0.1, 20, 0)
+stepFn()
+descriptor, selector = render()
+assert(find(descriptor.children, "lineViewer").snapPreview.snap.edgeId.index == 1)
+cursor = vec(-0.1, 20, 0)
+assert(selector.onSelect(77, {}, returnLeg) == false and #added == 3,
+    "An unseen left lane is refreshed before a click can accept it")
+inputActions.IA_SELECT.fn()
+assert(#added == 3, "The second input path cannot accept a pending but undrawn target")
+descriptor, selector = render()
+assert(find(descriptor.children, "lineViewer").snapPreview.snap.edgeId.index == 0, "The refreshed preview shows the new side")
+cursor = vec(0.1, 20, 0)
+inputActions.IA_SELECT.fn()
+assert(#added == 3, "Gamepad selection also refuses a new, unseen side")
+descriptor, selector = render()
+assert(find(descriptor.children, "lineViewer").snapPreview.snap.edgeId.index == 1)
+cursor = vec(-0.1, 20, 0)
+stepFn()
+descriptor, selector = render()
+assert(find(descriptor.children, "lineViewer").snapPreview.snap.edgeId.index == 0,
+    "A 0.2 m movement updates the preview during normal cursor following")
+cursor = vec(1.5, 20, 0)
+stepFn()
+descriptor, selector = render()
 assert(selector.onSelect(77, {}, returnLeg) == true)
 inputActions.IA_SELECT.fn()
 local routed = line.path[7] and line.path[7].waypoint and line.path[7].waypoint.edgePos
@@ -363,6 +429,19 @@ selector.onHover(99, {}, {line = {entity = 99, stopNumber = 1}})
 descriptor, selector, tooltip = render()
 assert(not tooltip and not find(descriptor.children, "overlay"), "Other lines' routes are ignored")
 assert(#added == 4)
+cursor = vec(0, 20, 0)
+selector.onHover(77, {}, {line = {entity = 77, stopNumber = 1}})
+descriptor, selector, tooltip = render()
+assert(tooltip.param.problem:find("More than one lane", 1, true) and not inputActions.IA_SELECT.enabled(),
+    "A route side tie is explained and cannot be placed")
+local oldHeight = entities[1].network.edges[1].geometry.z
+entities[1].network.edges[1].geometry.z = 12
+cursor = vec(1.5, 20, 0)
+selector.onHover(77, {}, {line = {entity = 77, stopNumber = 1}})
+descriptor, selector, tooltip = render()
+assert(tooltip.param.problem:find("above or below the ground", 1, true) and not inputActions.IA_SELECT.enabled(),
+    "An elevated candidate never silently resolves to the ground road")
+entities[1].network.edges[1].geometry.z = oldHeight
 
 -- A preview that cannot be drawn is reported once and described honestly.
 local constructor = builtin.type.EdgeRenderable.Edge.new
@@ -445,7 +524,39 @@ stepFn()
 env.ug_require("easier_waypoints::/plugins/easier_waypoints/direction.lua").nearestLane = nearestLane
 assert(warnings[#warnings]:find("placement cursor follow failed", 1, true)
     and not warnings[#warnings - 1]:find("cursor follow", 1, true), "A failing update is contained and logged once")
+assert(not inputActions.IA_SELECT.enabled(), "A failed target update immediately disables the retained action")
+inputActions.IA_SELECT.fn()
+assert(#added == 5, "A failed lane search cannot place on the previous side")
+descriptor, selector, tooltip = render()
+assert(not find(descriptor.children, "overlay"), "A stale lane is not left highlighted after failure")
 mode = finalMode
+
+-- Cached route indices and native snaps are bound to the path/mode/revision shown.
+cursor = vec(1.5, 20, 0)
+selector.onHover(77, {}, {line = {entity = 77, stopNumber = 6}})
+descriptor, selector = render()
+table.insert(line.path, 2, {waypoint = {tag = 1234}})
+assert(not inputActions.IA_SELECT.enabled(), "A structural edit invalidates a previously drawn route leg")
+inputActions.IA_SELECT.fn()
+assert(#added == 5, "An old route index cannot insert into a shifted stretch")
+table.remove(line.path, 2)
+descriptor, selector = render()
+local revision = {num = {1, 1, 1}}
+entities[1].revision = revision
+selector.onHover(1, {}, {transportNetworkEdge = {snap = snaps[1]}})
+descriptor, selector = render()
+revision.num[2] = 2
+assert(not inputActions.IA_SELECT.enabled(), "A live lane revision invalidates its displayed snap")
+inputActions.IA_SELECT.fn()
+assert(#added == 5)
+entities[1].revision = nil
+selector.onHover(1, {}, {transportNetworkEdge = {snap = snaps[1]}})
+descriptor, selector = render()
+mode = {"SEGMENT", 1}
+inputActions.IA_SELECT.fn()
+assert(#added == 5, "Changing the selected stretch cannot reuse the previous preview")
+mode = finalMode
+descriptor, selector = render()
 
 -- Finishing: a right drag belongs to the camera, a right click closes the tool once.
 assert(inputActions.IA_CLOSE_TOPMOST_WINDOW and inputActions.IA_MENU_BACK, "Escape is captured before native back handlers")
@@ -453,6 +564,12 @@ local mouse = selector.onProcessMouseEvent
 assert(mouse({type = "pressed", button = 0, x = 0, y = 0}) == false, "Left button untouched")
 assert(mouse({type = "pressed", button = 2, x = 100, y = 100}) == false, "A right press may start a camera drag")
 assert(mouse({type = "released", button = 2, x = 160, y = 120}) == false and popped == 0, "A right drag does not close")
+mouse({type = "pressed", button = 2, x = 100, y = 100})
+mouse({type = "moved", button = -1, x = 160, y = 120})
+assert(mouse({type = "released", button = 2, x = 102, y = 101}) == false and popped == 0,
+    "A drag that returns near its starting point is still a camera gesture")
+assert(mouse({type = "clicked", button = 2, x = 102, y = 101}) == false and popped == 0,
+    "A trailing click event after a drag cannot finish the tool")
 mouse({type = "pressed", button = 2, x = 100, y = 100})
 assert(mouse({type = "released", button = 2, x = 102, y = 101}) == true and popped == 1, "A right click closes")
 mouse({type = "clicked", button = 2, x = 102, y = 101})
@@ -470,6 +587,23 @@ stepFn()
 assert(#added == 5 and popped == 1 and #warnings == warningsAtClose, "Nothing happens, or is logged, after the tool has closed")
 expired = false
 
+-- Finish remains visible even when a native panel action changes editing mode.
+hooks, hookIndex = {}, 0 -- a newly mounted tool owns new state
+waypointButton(panel()).onClick()
+descriptor, selector = render()
+mode = {"MOVE_WAYPOINT", {}}
+local finishButton = waypointButton(panel())
+assert(finishButton.text == "Finish Waypoints" and finishButton.enabled, "Finish survives native editing-mode changes")
+finishButton.onClick()
+assert(pushed == 2 and popped == 2 and #stack == 1 and #added == 5, "Finish pops only the tool without editing the line")
+assert(#panel().children == 1, "After finishing, move mode has its native panel only")
+mode = finalMode
+assert(waypointButton(panel()).text == "Add Waypoint", "The idle button returns after finishing")
+expired = true
+panelStep()
+rowSteps[2]()
+expired = false
+
 -- The stylesheet only styles this mod's panel row, never native widgets elsewhere.
 local selectors = {}
 local cssEnv = setmetatable({require = function(path)
@@ -480,7 +614,8 @@ local cssEnv = setmetatable({require = function(path)
     end end}
 end}, {__index = _G})
 assert(loadfile(root .. "panel.css.lua", "t", cssEnv))()
-assert(#cssEnv.data() == #selectors and #selectors > 0)
+local styles = cssEnv.data()
+assert(#styles == #selectors and #selectors > 0)
 local styled = table.concat(selectors, "\n")
 for _, selector in ipairs(selectors) do
     for part in selector:gmatch("[^,]+") do
@@ -490,17 +625,28 @@ for _, selector in ipairs(selectors) do
 end
 assert(styled:find("!ew-waypoint-row", 1, true) and styled:find("Button!ew-add-waypoint", 1, true)
     and styled:find("!ew-waypoint-label", 1, true), "Panel and row classes are styled")
+local labelStyle
+for _, entry in ipairs(styles) do
+    if entry[1] == "R::EasierWaypointsStopItem !ew-waypoint-label TextView" then labelStyle = entry[2] end
+end
+assert(labelStyle and labelStyle.maxSize[1] == 232 and labelStyle.textAutoWrap == false,
+    "Labels stay within the native name field instead of covering row actions")
 
 -- If the registry is missing or another mod already replaced the row, rows stay native.
 for _, store in ipairs({false, {recipes = {[501] = function() end}, originalRecipeFn = {[501] = nativeRow},
-        recipeReplace = {[501] = function() end}, recipeReplacementAllowed = true}}) do
+        recipeReplace = {[501] = function() end}, recipeReplacementAllowed = true},
+        {recipes = {}, originalRecipeFn = {[501] = nativeRow}, recipeReplace = {}, recipeReplacementAllowed = true},
+        {recipes = {[501] = function() end}, originalRecipeFn = {}, recipeReplace = {}, recipeReplacementAllowed = true},
+        {recipes = {[501] = function() end}, originalRecipeFn = {[501] = nativeRow}, recipeReplace = {}, recipeReplacementAllowed = false},
+        {recipes = {[501] = function() end}, originalRecipeFn = {[501] = nativeRow}, recipeReplacementAllowed = true}}) do
     local otherEnv = environment(react, builtin, tooltips, nativePanel, buttons, store or nil)
     assert(loadfile(root .. "main.script.lua", "t", otherEnv))()
     local before = #warnings
     otherEnv.data().install({ReplaceRecipe = function() end})
     assert(#warnings == before + 1 and warnings[#warnings]:find("waypoint row text unavailable", 1, true),
         "Row patch declines and says why, once")
-    assert(not store or store.recipeReplace[501] ~= registry.EasierWaypointsStopItem, "Another mod's row is left alone")
+    assert(not store or not store.recipeReplace or store.recipeReplace[501] ~= registry.EasierWaypointsStopItem,
+        "Unavailable or occupied registries are left alone")
 end
 print("PASS: UI delegation, mode-aware guidance, placement tool, invalid-data fallback and no simulation commands")
 
@@ -514,7 +660,7 @@ end
 table.unpack = table.unpack or unpack
 table.pack = table.pack or function(...) return {n = select("#", ...), ...} end
 local store = {builtin = {BoxLayout = 1, TextView = 2, EdgeRenderable = 3, WithComponentParams = 4, Button = 5,
-        Component = 6, ImageView = 7},
+        Component = 6, ImageView = 7, FloatingLayout = 8, FloatingLayoutChild = 9},
     recipes = {}, recipeMetas = {}, originalRecipeFn = {}, recipeReplace = {}, tools = {}, recipeReplacementAllowed = true,
     extensionPoints = {}}
 local ids, nextId, nodes = {}, 100, {}
@@ -549,25 +695,53 @@ local rowId = realReact.GetRecipeId(realRow)
 local rowReplacement = store.recipeReplace[rowId]
 assert(rowReplacement and realReact.GetRecipeName(rowReplacement) == "EasierWaypointsStopItem",
     "The private row is replaced by name in the shipped registry")
-local context = {}
-function context:makeNodeWithProps(recipeId, _, props)
-    nodes[#nodes + 1] = {recipeId = recipeId, props = props}
-    return #nodes -- opaque ID, not a mutable node table
-end
-function context:setResult(children)
-    assert(#children == 1 and nodes[children[1]].recipeId == store.builtin.BoxLayout,
-        "Replacement recipes must return a layout")
-    self.result = nodes[children[1]]
+local function executeReplacement(recipe, arg, expectedRoot)
+    local context = {steps = {}}
+    function context:makeNodeWithProps(recipeId, _, props)
+        nodes[#nodes + 1] = {recipeId = recipeId, props = props}
+        return #nodes -- opaque ID, not a mutable node table
+    end
+    function context:declareState(initial)
+        local value = initial
+        return {old = function() return value end, set = function(_, nextValue) value = nextValue end,
+            hasExpired = function() return false end}
+    end
+    function context:onStep(fn) self.steps[#self.steps + 1] = fn end
+    function context:setResult(children)
+        assert(#children == 1 and nodes[children[1]].recipeId == expectedRoot,
+            "Replacement returned an unexpected root recipe")
+        self.result = nodes[children[1]]
+    end
+    local replacement = assert(store.recipeReplace[realReact.GetRecipeId(recipe)])
+    store.recipes[realReact.GetRecipeId(replacement)](context, {props = {arg}})
+    assert(context.result)
+    return context
 end
 assert(not store.recipeReplace[realReact.GetRecipeId(realTips.LMAddWaypoint)]
     and not store.recipeReplace[realReact.GetRecipeId(realTips.LMMoveWaypointTarget)], "Only the prompt tooltip is replaced")
 for _, recipe in ipairs({realTips.LMPromptWaypointModifier, realPanel}) do
-    local id = realReact.GetRecipeId(recipe)
-    local replacement = assert(store.recipeReplace[id])
-    local replacementId = realReact.GetRecipeId(replacement)
     local arg = recipe == realPanel and params or candidate
-    context.result = nil
-    store.recipes[replacementId](context, {props = {arg}})
-    assert(context.result)
+    local context = executeReplacement(recipe, arg, store.builtin.BoxLayout)
+    if recipe == realPanel then
+        assert(#context.steps == 1, "Panel registers its live-state refresh with the real React hooks")
+        context.steps[1]()
+    end
 end
+local rowParams = {stopNumber = 1, viaState = {old = function() return rowPath end},
+    commonParams = {lineState = {old = function() return rowLine end}}}
+local stopContext = executeReplacement(realRow, rowParams, rowId)
+assert(stopContext.result.props.props[1] == rowParams, "Ordinary stops keep the original native row and parameters")
+rowParams = {stopNumber = 2, viaState = {old = function() return rowPath end},
+    commonParams = {lineState = {old = function() return rowLine end}}}
+local waypointContext = executeReplacement(realRow, rowParams, store.builtin.FloatingLayout)
+local rowChildren = waypointContext.result.props.props[1].children
+assert(#rowChildren == 2)
+local nativeChild, labelChild = nodes[rowChildren[1]], nodes[rowChildren[2]]
+assert(nativeChild.recipeId == store.builtin.FloatingLayoutChild and labelChild.recipeId == store.builtin.FloatingLayoutChild)
+local nativeNode = nodes[nativeChild.props.props[1].item]
+assert(nativeNode.recipeId == rowId and nativeNode.props.props[1] == rowParams,
+    "A waypoint label preserves the original row using opaque node IDs")
+local labelNode = nodes[labelChild.props.props[1].item]
+assert(labelNode.recipeId == store.builtin.WithComponentParams
+    and labelNode.props.props[1].mouseTransparent == true, "The label cannot intercept the native row's clicks")
 print("PASS: shipped TF3 Lua React registration/replacement with opaque node IDs (native C++ untested)")

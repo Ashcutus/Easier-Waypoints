@@ -239,7 +239,19 @@ local HEADINGS = {
     west = function() return _("west") end, ["north-west"] = function() return _("north-west") end,
 }
 local LABEL_CACHE_LIMIT = 512
-local labels, labelCount = {}, 0
+local labelDirections, labelDirectionCount = {}, 0
+
+-- Copy the native revision numbers: engine-owned revision objects may change in
+-- place. Without a readable revision, recompute rather than retain a heading.
+local function labelRevision(entity)
+    if not api.engine.getRevision then return nil end
+    local ok, revision = pcall(function()
+        local numbers = api.engine.getRevision(entity).num
+        if type(numbers[1]) ~= "number" or type(numbers[2]) ~= "number" or type(numbers[3]) ~= "number" then return nil end
+        return tostring(numbers[1]) .. ":" .. tostring(numbers[2]) .. ":" .. tostring(numbers[3])
+    end)
+    return ok and revision or nil
+end
 
 -- Stop-list text for a waypoint row, e.g. "Waypoint - Ring Road - heading north-east".
 function M.waypointLabel(waypoint, carriers)
@@ -251,13 +263,29 @@ function M.waypointLabel(waypoint, carriers)
     local snap = waypoint.edgePos
     local entity = snap and snap.edgeId and snap.edgeId.entity
     if not entity or not api.engine.entityExists(entity) then return _("Waypoint") end
-    local key = tostring(entity) .. ":" .. tostring(snap.edgeId.index) .. ":" .. string.format("%.3f", snap.param)
-    if labels[key] then return labels[key] end
+    local key = tostring(entity) .. ":" .. tostring(snap.edgeId.index) .. ":" .. string.format("%.17g", snap.param)
+    local revision = labelRevision(entity)
+    local cached = revision and labelDirections[key]
+    local heading, both
+    if cached and cached.revision == revision then
+        heading, both = cached.heading, cached.both
+    else
+        local ok, preview = pcall(direction.preview, {edgePos = snap}, M.backend)
+        heading = ok and preview and preview.direction == "forward" and direction.compass(preview.tangent)
+        both = ok and preview and preview.direction == "both"
+        -- Unavailable or unconfirmed data may be temporary; retry it next time.
+        if revision and (heading or both) then
+            if labelDirectionCount >= LABEL_CACHE_LIMIT then labelDirections, labelDirectionCount = {}, 0 end
+            if not labelDirections[key] then labelDirectionCount = labelDirectionCount + 1 end
+            labelDirections[key] = {revision = revision, heading = heading, both = both}
+        elseif labelDirections[key] then
+            labelDirections[key] = nil
+            labelDirectionCount = labelDirectionCount - 1
+        end
+    end
+    -- Names and translated text stay live even while the geometry is unchanged.
     local road = api.engine.util.getEntityName(entity)
     if type(road) ~= "string" or road == "" then road = nil end
-    local ok, preview = pcall(direction.preview, {edgePos = snap}, M.backend)
-    local heading = ok and preview and preview.direction == "forward" and direction.compass(preview.tangent)
-    local both = ok and preview and preview.direction == "both"
     local label
     if heading then
         local values = {road = road, heading = HEADINGS[heading]()}
@@ -269,8 +297,6 @@ function M.waypointLabel(waypoint, carriers)
     else
         label = road and langUtil.format(_("Waypoint - {road}"), {road = road}) or _("Waypoint")
     end
-    if labelCount >= LABEL_CACHE_LIMIT then labels, labelCount = {}, 0 end
-    labels[key], labelCount = label, labelCount + 1
     return label
 end
 
