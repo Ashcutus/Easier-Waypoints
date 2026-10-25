@@ -4,6 +4,9 @@
   `.local/`, ignored by git. Do not publish game source or private investigations.
 - Use supported TF3 APIs. Do not introduce fragile runtime patches without explicit
   operator approval. Current UI integrations use `react-replacement-config`.
+- Keep development decisions, designs and investigation findings in `.local/design/`.
+  Never commit them or put them in commit messages or PR descriptions; keep those
+  short and factual. Read `.local/design/decisions.md` before changing the mod.
 - Preserve native routing and editing. Do not issue simulation commands while
   hovering or cancelling. Do not claim pathfinding equivalence from network search.
 - `VERSION` is the public semantic version. `mod/easier_waypoints_1/mod.json` uses

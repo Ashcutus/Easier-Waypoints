@@ -15,6 +15,9 @@ RUNTIME_FILES = (
     "_metadata/modinfo.json",
     "content/plugins/easier_waypoints/main.script.lua",
     "content/plugins/easier_waypoints/direction.lua",
+    "content/plugins/easier_waypoints/game.lua",
+    "content/plugins/easier_waypoints/placement.lua",
+    "content/plugins/easier_waypoints/panel.css.lua",
     "content/plugins/easier_waypoints/preview.res.lua",
 )
 

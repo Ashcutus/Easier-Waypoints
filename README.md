@@ -2,58 +2,72 @@
 
 **One road. One direction. No guesswork.**
 
-An experimental Transport Fever 3 UI mod that makes the selected road lane and
-its travel direction visible before a waypoint is placed or moved.
+A Transport Fever 3 mod that shows where a waypoint will go before you place it:
+the lane, its direction of travel and the part of the line you are editing. It
+works for road, tram, rail, ship and air lines.
 
-## Prototype status
+## Status
 
-Version **0.1.0**, game revision **1**. Offline checks cover geometry, cyclic stop
-sequences, UI delegation and release tooling. **In-game rendering, save/load and
-stable-branch compatibility have not been verified.** The inspected installation
-was Linux Steam preview build 26129055. This is a prototype, not a finished mod.
+Version **0.2.0**, game revision **2**. **Experimental:** not yet verified in-game.
 
-- Cyan highlights the candidate lane; white arrows show its direction.
-- An edge reported as bidirectional gets arrows both ways.
-- The stop panel names the selected stretch between stops.
-- Unsupported or stale candidate data keeps the game's original feedback.
-- Native controls still place, move and remove waypoints. No simulation commands,
-  custom save data, automatic route correction or background line updates.
+## Features
 
-The prototype uses TF3's `react-replacement-config`, `ReplaceRecipe` and
-`CallOriginalRecipe` APIs. It replaces three small tooltip recipes and wraps the
-stop panel; it does not replace the Line Manager implementation or monkey-patch
-module functions. Other UI mods targeting these same recipes can conflict.
+- An **Add Waypoint** button above the stop list while you edit a line. Its tooltip
+  says which part of the line new waypoints go into. While placing, it becomes
+  **Finish Waypoints**, so the active mode and its exit stay visible.
+- The placement tool highlights the lane under the cursor (red where the line's
+  vehicles can't go) and shows the direction of travel before you click. Each click
+  adds the next waypoint in order. Right-click or press Esc to finish.
+- Waypoint rows in the stop list name the road and the heading, for example
+  "Waypoint - Ring Road - heading north-east". Names and headings refresh when the
+  road changes; long labels stay inside the name field.
+- The Line Manager stays open while you place waypoints.
+- Click the line's route to add a waypoint to that part of the line. Move across
+  the road to choose the side; the highlight and arrow follow. A changed lane must
+  be previewed before a click can accept it. Ambiguous route picks, including
+  overlapping roads and large differences from terrain height, are refused;
+  pick the road or track directly, or finish and use the game's waypoint key.
+- Arrows are only shown when the road's own lane data confirms the direction.
+  Tracks are shown as usable both ways, because the route decides.
+- Ships and aircraft get a point marker, with the game's own water and spacing
+  checks.
+- Holding the game's waypoint key and clicking still works; the tooltips explain it.
+- The game's own Line Manager saves every change. No custom save data.
+
+| Line type | Waypoint | What is shown |
+|---|---|---|
+| Road, tram | Lane | Lane highlight, travel arrow, stretch |
+| Rail | Track | Track highlight, both-way arrows, stretch |
+| Ship, aircraft | Point | Marker, water and spacing feedback, stretch |
+
+Other mods that replace the Line Manager's waypoint tooltips or stop panel may
+conflict with this one.
 
 ## Trying it locally
 
-Build the ZIP with `python3 scripts/package_release.py`. Use a disposable save.
-Open the game's user-data folder from Settings → Advanced, then put the
+Build the ZIP with `python3 scripts/package_release.py`. Back up the save you test
+with. Open the game's user-data folder from Settings → Advanced, then put the
 `easier_waypoints_1` folder from the ZIP into its development `staging_area`.
-Restart the game, enable Easier Waypoints, and select a road line in Line Manager.
-Select the stretch to edit and use the game's displayed Add Waypoint action.
-Hover over both sides of a road before clicking. Move/remove existing waypoints
-with the normal native controls. There is no standalone placement button yet.
-
-First check that the highlight and arrows appear before clicking, follow a curve
-and slope, and disappear when leaving placement. Check that hover/cancel does not
-edit the line. Bridges, tunnels, junctions, one-way roads and UI scaling need
-in-game verification. Unsupported junction-only networks deliberately fall back
-to native feedback. Reachability and full proposed routes are not predicted.
+Restart the game and enable Easier Waypoints. In the Line Manager, select a line,
+then the stretch to edit, and press **Add Waypoint**.
 
 ## Development checks
 
 ```sh
 lua5.4 tests/direction_test.lua
+lua5.4 tests/waypoint_label_test.lua
 lua5.4 tests/ui_contract_test.lua
+luajit tests/direction_test.lua
+luajit tests/waypoint_label_test.lua
+luajit tests/ui_contract_test.lua
 python3 -m unittest discover -s tests -p '*_test.py'
 python3 scripts/package_release.py
 ```
 
-The UI contract test uses test doubles for native engine objects. To additionally
-exercise the shipped Lua React registry, set `TF3_REACT_LUA` to your own game's
-`gui/main/react.lua` extracted from `base/content/gui.zip`. Game source is not
-included in this repository or its packages. Offline checks do not validate the
-native C++ renderer or mod loader.
+To also run the UI test against the game's React registry, set `TF3_REACT_LUA` to
+your own game's `gui/main/react.lua` extracted from `base/content/gui.zip`. Game
+source is not included in this repository or its packages. Offline checks do not
+cover in-game behaviour.
 
 ## Versioning and release tooling
 
@@ -66,7 +80,7 @@ Adapted from [Subsidy Manager](https://github.com/Ashcutus/Transport-Fever-3-Sub
 - `scripts/package_release.py` builds a deterministic runtime-only ZIP and SHA-256
   checksum. It never uploads or publishes anything.
 - Start each in-game upload changelog with `vMAJOR.MINOR.PATCH`, for example
-  `v0.1.0 — Experimental direction preview`.
+  `v0.2.0 — Experimental placement tool for every line type`.
 - `scripts/set_modio_version.py` preserves Subsidy Manager's preview-first/manual
   confirmation, HTML changelog matching, file-ID validation, conflict protection,
   rechecks and post-write verification. It changes version labels only.
