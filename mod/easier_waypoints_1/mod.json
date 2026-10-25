@@ -1,0 +1,10 @@
+{
+  "modId": "easier_waypoints",
+  "revision": 1,
+  "severityAdd": "None",
+  "severityRemove": "None",
+  "cosmetic": true,
+  "visible": true,
+  "dependencies": null,
+  "incompatibilities": null
+}

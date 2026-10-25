@@ -1,0 +1,32 @@
+# Labels mod.io uploads with the version their changelog starts with, e.g.
+# "v0.1.0 — Direction preview". TF3's in-game uploader leaves the label "1.0".
+# Only the version label changes; nothing is uploaded or published.
+name: mod.io version labels
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: modio-version-labels
+  cancel-in-progress: false
+
+jobs:
+  label:
+    # Set this repository variable only after Easier Waypoints has its own listing.
+    if: vars.MODIO_MOD_ID != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Label new uploads
+        env:
+          MODIO_ACCESS_TOKEN: ${{ secrets.MODIO_ACCESS_TOKEN }}
+          MODIO_MOD_ID: ${{ vars.MODIO_MOD_ID }}
+        run: python3 scripts/set_modio_version.py --sync --apply

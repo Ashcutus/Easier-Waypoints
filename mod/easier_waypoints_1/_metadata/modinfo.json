@@ -1,0 +1,8 @@
+{
+  "authors": [{"name": "Ashcutus", "role": "CREATOR"}],
+  "name": "Easier Waypoints",
+  "summary": "See the selected road lane and its direction before placing a waypoint.",
+  "description": "One road. One direction. No guesswork.\n\nEasier Waypoints is an experimental visual aid for road waypoint placement. It highlights the candidate lane and draws travel arrows before placement. A two-way edge receives arrows in both directions. The native Line Manager keeps control of placement, movement and removal.\n\nHOW TO TRY\nSelect a road line and the stretch you want to edit in the Line Manager. Use the game's displayed Add Waypoint action and hover over each side of a road. Compare the lane highlight and arrows before clicking. Existing waypoint movement and removal use the game's usual controls.\n\nLIMITS\nThis prototype has not yet been verified in-game. It does not predict the full route or decide whether a lane is reachable. Some junctions and unsupported lane data use the original game feedback. Other mods replacing the same placement tooltips or stop panel may conflict.\n\nCHANGES\n\nv0.1.0 — Experimental direction preview\nCandidate road lane highlight, directional chevrons, clearer placement guidance and selected-segment context. No simulation commands or custom save data.",
+  "tags": ["Misc", "Script Mod"],
+  "url": "https://github.com/Ashcutus/Easier-Waypoints"
+}
