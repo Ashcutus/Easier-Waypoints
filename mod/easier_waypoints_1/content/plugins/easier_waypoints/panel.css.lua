@@ -40,5 +40,21 @@ function data()
         maxSize = { 232, -1 },
         textAutoWrap = false,
     })
+    a("R::EasierWaypointsLineFeedback !ew-line-waypoints", {
+        margin = { 0, 4, 0, 4 },
+        gravity = { 0, 0.5 },
+    })
+    a("R::EasierWaypointsLineFeedback !ew-line-waypoints BoxLayout", {
+        innerSpacing = { 3, 0 },
+        gravity = { 0, 0.5 },
+    })
+    a("R::EasierWaypointsLineFeedback !ew-line-waypoints ImageView", {
+        size = { 12, 12 },
+        gravity = { 0, 0.5 },
+    })
+    a("R::EasierWaypointsLineFeedback !ew-line-waypoints TextView", {
+        gravity = { 0, 0.5 },
+        textAutoWrap = false,
+    })
     return result
 end

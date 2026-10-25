@@ -4,6 +4,7 @@ local buttons = ug_require "::/gui/main/button_react_util.tl"
 local tooltips = ug_require "::/gui/line_vehicle_mgmt/manager_tooltips_util.tl"
 local nativePanel = ug_require "::/gui/line_vehicle_mgmt/line_manager_panel.tl"
 local lineUtil = ug_require "::/gui/line_vehicle_mgmt/line_util.tl"
+local lineReactUtil = ug_require "::/gui/line_vehicle_mgmt/line_react_util.tl"
 local appUtil = ug_require "::/scripts/app_util.tl"
 local game = ug_require "easier_waypoints::/plugins/easier_waypoints/game.lua"
 local placement = ug_require "easier_waypoints::/plugins/easier_waypoints/placement.lua"
@@ -25,6 +26,36 @@ local Prompt = react.RegisterRecipe("EasierWaypointsPrompt", function(waypoint)
 end)
 
 local WAYPOINT_ICON = "::/gui/construction/menu/menu_categories/category_waypoints.tga"
+
+local function readWaypointCount(entity)
+    local ok, count = pcall(game.waypointCount, entity)
+    if not ok then game.warnOnce("line waypoint count unavailable", count); return 0 end
+    return count
+end
+
+-- This exported widget sits beside line names. Keep its native notifications
+-- and add a non-focusable count without replacing the line's own controls.
+local LineFeedback = react.RegisterRecipe("EasierWaypointsLineFeedback", function(entity)
+    local countState = react.useState(readWaypointCount(entity))
+    react.onStepTimer(function()
+        if countState.hasExpired and countState:hasExpired() then return end
+        local count = readWaypointCount(entity)
+        if countState:old() ~= count then countState:set(count) end
+    end, 0.25)
+    local children = {}
+    local count = countState:old()
+    if count > 0 then
+        children[#children + 1] = builtin.Component {
+            meta = {class = "ew-line-waypoints", tooltip = game.waypointCountText(count)},
+            layout = builtin.BoxLayout {orientation = builtin.type.Orientation.Horizontal, children = {
+                builtin.ImageView {path = WAYPOINT_ICON},
+                builtin.TextView {meta = {class = "font-scale-annotation"}, text = tostring(count)},
+            }},
+        }
+    end
+    children[#children + 1] = react.CallOriginalRecipe(lineReactUtil.ManagerNotificationWidget, entity)
+    return builtin.BoxLayout {orientation = builtin.type.Orientation.Horizontal, children = children}
+end)
 
 local function finishHint()
     if appUtil.isGamepadInputMode() then return _("Use Back when you're done.") end
@@ -154,6 +185,7 @@ end
 local replacements = {
     {tooltips.LMPromptWaypointModifier, Prompt},
     {nativePanel, Panel},
+    {lineReactUtil.ManagerNotificationWidget, LineFeedback},
 }
 
 function data()

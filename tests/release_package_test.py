@@ -33,7 +33,7 @@ class ReleaseTests(unittest.TestCase):
                 self.assertEqual(set(package.namelist()), {prefix + path for path in builder.RUNTIME_FILES})
                 manifest = json.loads(package.read(prefix + "mod.json"))
                 self.assertEqual(manifest["modId"], "easier_waypoints")
-                self.assertEqual(manifest["revision"], 2)
+                self.assertEqual(manifest["revision"], 3)
                 self.assertNotIn("version", manifest)
                 self.assertEqual(package.read(prefix + "license.txt"), (ROOT / "LICENSE").read_bytes())
                 # No mod.io listing is ever baked into the runtime package.

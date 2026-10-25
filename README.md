@@ -8,10 +8,13 @@ works for road, tram, rail, ship and air lines.
 
 ## Status
 
-Version **0.2.0**, game revision **2**. **Experimental:** not yet verified in-game.
+Version **0.3.0**, game revision **3**. **Experimental:** not yet verified in-game.
 
 ## Features
 
+- A waypoint pin and count beside each line name in the Line Manager. The count
+  updates as waypoints are added or removed and is hidden when there are none.
+  Hover over the badge for an explanation; native warning icons stay visible.
 - An **Add Waypoint** button above the stop list while you edit a line. Its tooltip
   says which part of the line new waypoints go into. While placing, it becomes
   **Finish Waypoints**, so the active mode and its exit stay visible.
@@ -40,8 +43,8 @@ Version **0.2.0**, game revision **2**. **Experimental:** not yet verified in-ga
 | Rail | Track | Track highlight, both-way arrows, stretch |
 | Ship, aircraft | Point | Marker, water and spacing feedback, stretch |
 
-Other mods that replace the Line Manager's waypoint tooltips or stop panel may
-conflict with this one.
+Other mods that replace the Line Manager's waypoint tooltips, stop panel or
+notification widget may conflict with this one.
 
 ## Trying it locally
 
@@ -80,7 +83,7 @@ Adapted from [Subsidy Manager](https://github.com/Ashcutus/Transport-Fever-3-Sub
 - `scripts/package_release.py` builds a deterministic runtime-only ZIP and SHA-256
   checksum. It never uploads or publishes anything.
 - Start each in-game upload changelog with `vMAJOR.MINOR.PATCH`, for example
-  `v0.2.0 — Experimental placement tool for every line type`.
+  `v0.3.0 — Per-line waypoint counts`.
 - `scripts/set_modio_version.py` preserves Subsidy Manager's preview-first/manual
   confirmation, HTML changelog matching, file-ID validation, conflict protection,
   rechecks and post-write verification. It changes version labels only.
