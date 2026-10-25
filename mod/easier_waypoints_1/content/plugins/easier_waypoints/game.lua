@@ -81,7 +81,7 @@ M.backend = {
         if not api.gui.mouse.hasTerrainPosition() then return nil end
         return api.gui.mouse.getTerrainPosition()
     end,
-    -- Street and track edges near a point, queried like the game's own tutorial.
+    -- Street and track edges near a point.
     edgesNear = function(position, radius)
         return api.engine.util.octree.findEntitiesInCircle(api.type.Vec2f.new(position.x, position.y), radius,
             api.type.ComponentType.BASE_EDGE) or {}
@@ -160,8 +160,7 @@ function M.previewUnavailableText(point, clickStillWorks)
     return _("Preview unavailable: the lane highlight couldn't be drawn.")
 end
 
--- Plain text only: inline key hints did not render in the stop panel, and
--- display names must never be parsed as markup.
+-- Plain text only: display names must never be parsed as markup.
 function M.tooltipText(text)
     return builtin.TextView {meta = {class = TOOLTIP_CLASS}, text = text}
 end

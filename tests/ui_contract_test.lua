@@ -40,7 +40,7 @@ local api = {
         end,
         util = {getEntityName = function(entity) return entities[entity] and entities[entity].name end,
             octree = {findEntitiesInCircle = function(center, radius, component)
-                assert(component == "base" and radius > 0, "Query street/track edges like the game's tutorial")
+                assert(component == "base" and radius > 0, "Search street and track edges")
                 edgeQueries = edgeQueries + 1
                 local found = {}
                 for entity, e in pairs(entities) do

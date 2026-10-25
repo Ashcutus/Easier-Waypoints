@@ -1,9 +1,8 @@
 local ssu = require "::/gui/main/stylesheetutil.lua"
 
--- Metrics follow the native line panel (line_vehicle_mgmt.css.lua): the row lines
--- up with the stop names (20 spacer + 30 indicator + 1 margin) and the button keeps
--- the 20-unit height of the stop rows' square buttons, so it stays unobtrusive.
--- Margins and paddings are { top, right, bottom, left }, as seen in-game.
+-- The row lines up with the stop names (20 spacer + 30 indicator + 1 margin) and
+-- the button keeps the stop rows' 20-unit height.
+-- Margins and paddings are { top, right, bottom, left }.
 function data()
     local result = {}
     local a = ssu.makeAdder(result)

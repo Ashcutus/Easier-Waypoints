@@ -2,60 +2,38 @@
 
 **One road. One direction. No guesswork.**
 
-An experimental Transport Fever 3 UI mod that shows where a waypoint will go
-before it is placed: the lane, its direction of travel and the stretch of the line
-being edited. It covers road, tram, rail, ship and air lines.
+A Transport Fever 3 mod that shows where a waypoint will go before you place it:
+the lane, its direction of travel and the part of the line you are editing. It
+works for road, tram, rail, ship and air lines.
 
 ## Status
 
-Version **0.2.0**, game revision **2**. Offline checks cover lane geometry, the
-direction cross-check, stretch resolution, UI delegation, the placement tool, Lua
-5.2 compatibility and release tooling. **Nothing has been verified in-game yet.**
-Code was checked against Linux Steam preview build 26129055. 0.2.0 stays
-**experimental** until it passes the in-game smoke test below.
+Version **0.2.0**, game revision **2**. **Experimental:** not yet verified in-game.
 
-- A small **Add Waypoint** button sits above the stop list while a line is being
-  edited; its tooltip names the stretch. It opens a placement tool on top of the
-  Line Manager that highlights the lane under the cursor (cyan, or red where the
-  line's vehicles can't go), draws the direction of travel and names the stretch.
-  Each click adds the next waypoint in order; right-click or Esc finishes. No
-  modifier key is needed.
-- **Click the route** in the placement tool to add a waypoint to that part of the
-  line. The game reports which leg was clicked; the waypoint goes on the lane
-  nearest the cursor, previewed before the click. Move across the road to pick the
-  other side: the highlight and arrow follow. Ships and aircraft place free points.
-- The tool's tooltip only appears when it has something to say: the leg while
-  aiming, or a problem or direction caveat.
-- The native flow still works. Its tooltips now say that the key shown in the
-  game's own prompt must be held while clicking, and they explain direction.
-  All text is plain; key-hint markup did not render in the stop panel.
-- Arrows only appear when the lanes at that spot agree with the street's own lane
-  config. Otherwise the lane is highlighted without an arrow and the tooltip says
-  the direction couldn't be confirmed. Tracks are shown as usable both ways.
-- Ships and aircraft get a point marker. Water-on-land and too-close checks match
-  the game's own rules.
-- If a highlight or marker can't be drawn, the tooltip says the preview is
-  unavailable instead of describing it, and a warning is logged once per cause.
-- The stretch named is the one the game will really edit. This includes the
-  "no stretch selected" case, where native `addWaypoint` inserts before the last
-  entry rather than appending.
-- Every change is committed by the Line Manager's own `addWaypoint`. Hovering and
-  cancelling never edit the line. No custom save data, automatic route correction
-  or background line updates.
+## Features
+
+- An **Add Waypoint** button above the stop list while you edit a line. Its tooltip
+  says which part of the line new waypoints go into.
+- The placement tool highlights the lane under the cursor (red where the line's
+  vehicles can't go) and shows the direction of travel before you click. Each click
+  adds the next waypoint in order. Right-click or press Esc to finish.
+- Click the line's route to add a waypoint to that part of the line. Move across
+  the road to choose the side; the highlight and arrow follow.
+- Arrows are only shown when the road's own lane data confirms the direction.
+  Tracks are shown as usable both ways, because the route decides.
+- Ships and aircraft get a point marker, with the game's own water and spacing
+  checks.
+- Holding the game's waypoint key and clicking still works; the tooltips explain it.
+- The game's own Line Manager saves every change. No custom save data.
 
 | Line type | Waypoint | What is shown |
 |---|---|---|
-| Road, tram | Lane snap | Lane highlight, confirmed travel arrow, stretch |
-| Rail | Track snap | Track highlight, both-way arrows (the route decides), stretch |
-| Ship, aircraft | Point | Marker, water/too-close feedback, stretch |
+| Road, tram | Lane | Lane highlight, travel arrow, stretch |
+| Rail | Track | Track highlight, both-way arrows, stretch |
+| Ship, aircraft | Point | Marker, water and spacing feedback, stretch |
 
-The mod uses TF3's `react-replacement-config`, `ReplaceRecipe` and
-`CallOriginalRecipe` APIs to replace three small tooltip recipes and wrap the stop
-panel. The placement tool is a normal stacked tool (`toolStack.push`) whose
-overlay is a direct `ActionDescriptor` child, the same mount the game uses for
-mission arrows. It does not replace the Line Manager or monkey-patch module
-functions. Other UI mods replacing the same recipes conflict silently: the game
-keeps one replacement per recipe.
+Other mods that replace the Line Manager's waypoint tooltips or stop panel may
+conflict with this one.
 
 ## Trying it locally
 
@@ -64,26 +42,6 @@ with. Open the game's user-data folder from Settings → Advanced, then put the
 `easier_waypoints_1` folder from the ZIP into its development `staging_area`.
 Restart the game and enable Easier Waypoints. In the Line Manager, select a line,
 then the stretch to edit, and press **Add Waypoint**.
-
-Smoke test, in order:
-
-1. The mod loads without errors or Easier Waypoints warnings (check `stdout.txt`
-   in the user-data folder).
-2. Preview both directions of a two-way road: the highlight and arrow appear and
-   match real traffic on each side.
-3. Place three distinct waypoints and check they appear in that order in the stop
-   list, each on the highlighted lane, with hovering editing nothing.
-4. Point at the route on a different part of the line, move across the road to
-   switch side, click, and check the waypoint lands in that part on that side.
-5. Right-click (or press Esc) and check the Line Manager returns with the line and
-   stretch intact; a right-drag should still rotate the camera.
-6. Then: ship and aircraft placement, gamepad input and stop-list focus.
-
-Further checks: one-way and tram streets, junction approaches and tracks; whether
-the native-flow tooltip overlay renders (it may not, from a tooltip); after moving
-a waypoint, the button's stretch matches where the next native Shift-click lands;
-route clicks on bridges and in tunnels (the ground point lies below the deck);
-slopes and UI scaling.
 
 ## Development checks
 
@@ -96,13 +54,10 @@ python3 -m unittest discover -s tests -p '*_test.py'
 python3 scripts/package_release.py
 ```
 
-The game embeds Lua 5.2.2. The Lua tests run on 5.4 and on LuaJIT (5.1-based), and
-`tests/lua_compat_test.py` rejects 5.3+ syntax and libraries as well as 5.1-only
-globals in runtime Lua. The UI contract test uses test doubles for native engine
-objects. To also exercise the shipped Lua React registry, set `TF3_REACT_LUA` to
+To also run the UI test against the game's React registry, set `TF3_REACT_LUA` to
 your own game's `gui/main/react.lua` extracted from `base/content/gui.zip`. Game
 source is not included in this repository or its packages. Offline checks do not
-validate the native C++ renderer, input handling or mod loader.
+cover in-game behaviour.
 
 ## Versioning and release tooling
 
