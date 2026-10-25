@@ -26,5 +26,12 @@ function data()
     a("R::EasierWaypointsPanel Button!ew-add-waypoint TextView", {
         gravity = { 0, 0.5 },
     })
+    -- Waypoint rows: the label sits where a stop's name would be.
+    a("R::EasierWaypointsStopItem FloatingLayout!ew-waypoint-row-layout", {
+        gravity = { -1, -1 },
+    })
+    a("R::EasierWaypointsStopItem !ew-waypoint-label", {
+        margin = { 0, 0, 0, stopNameIndent },
+    })
     return result
 end

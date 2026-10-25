@@ -17,6 +17,9 @@ Version **0.2.0**, game revision **2**. **Experimental:** not yet verified in-ga
 - The placement tool highlights the lane under the cursor (red where the line's
   vehicles can't go) and shows the direction of travel before you click. Each click
   adds the next waypoint in order. Right-click or press Esc to finish.
+- Waypoint rows in the stop list name the road and the heading, for example
+  "Waypoint - Ring Road - heading north-east".
+- The Line Manager stays open while you place waypoints.
 - Click the line's route to add a waypoint to that part of the line. Move across
   the road to choose the side; the highlight and arrow follow.
 - Arrows are only shown when the road's own lane data confirms the direction.

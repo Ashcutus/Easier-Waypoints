@@ -102,6 +102,12 @@ check(model.nearestLane({x = 1.5, y = 200, z = 0}, {7}, backend, {ROAD = true}, 
 check(model.nearestLane({x = 0/0, y = 0, z = 0}, {7}, backend, {ROAD = true}, 8) == nil, "Invalid cursor position")
 check(model.nearestLane({x = 1.5, y = 200, z = 0}, {}, backend, {ROAD = true}, 8) == nil, "No networks nearby")
 
+check(model.compass({x = 0, y = 1, z = 0}) == "north" and model.compass({x = 1, y = 0.2, z = 0}) == "east",
+    "Compass: +y north, +x east")
+check(model.compass({x = -1, y = -1, z = 0}) == "south-west" and model.compass({x = 0.3, y = -1, z = 0}) == "south",
+    "Diagonals and near-axis headings")
+check(model.compass({x = 0, y = 0, z = 1}) == nil and model.compass({x = 0/0, y = 1, z = 0}) == nil, "No heading without a direction")
+
 local marker = model.markerSegments({x = 1, y = 2, z = 3})
 check(#marker == 3 and marker[3][2].z == 9, "Point waypoints get a cross and a post")
 check(#model.markerSegments({x = 0/0, y = 0, z = 0}) == 0, "Invalid points draw nothing")

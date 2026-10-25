@@ -18,6 +18,12 @@ local entities = {
 }
 local exists = true
 local cursor -- ground point under the mouse, or nil
+local shownWindows, soundSets, sounds = {}, {}, {}
+-- Private stop-row recipe as the game's React registry holds it.
+local recipeIdFor = function(name) return name == "LineStopItem" and 501 or 999 end
+local nativeRow = function(rowParams) return {kind = "nativeRow", param = rowParams} end
+local registryStore = {recipes = {[501] = function() end}, originalRecipeFn = {[501] = nativeRow}, recipeReplace = {},
+    recipeReplacementAllowed = true}
 local edgeQueries = 0
 local api = {
     type = {ComponentType = {BASE_EDGE = "base", BASE_EDGE_STREET = "street", BASE_NODE = "node",
@@ -51,10 +57,13 @@ local api = {
                 return found
             end}}},
     gui = {SelectionDetails = {TransportNetworkEdge = {new = function() return {} end}},
+        react = {detail = {makeRecipeId = function(name) return recipeIdFor(name) end}},
+        byId = {setVisible = function(id, visible) shownWindows[#shownWindows + 1] = {id, visible} end},
         mouse = {hasTerrainPosition = function() return cursor ~= nil end, getTerrainPosition = function() return cursor end,
             Event = {Type = {Pressed = "pressed", Released = "released", Clicked = "clicked"}}},
-        genericRep = {find = function() return 1 end, get = function() return {data = {AddWaypoint = {"add.wav"}}} end},
-        sound = {playRandomSoundEffect = function() end}},
+        genericRep = {find = function(path) soundSets[#soundSets + 1] = path; return path end,
+            get = function(path) return {data = {AddWaypoint = {"bell.wav"}, ButtonClick = {"click.wav"}}} end},
+        sound = {playRandomSoundEffect = function(sound) sounds[#sounds + 1] = sound[1] end}},
     cmd = setmetatable({}, {__index = function() error("UI code must never issue commands directly") end}),
 }
 
@@ -80,6 +89,7 @@ local react = {
     iaHandler = function(fn, enabled, text) return {fn = fn, enabled = enabled, text = text} end,
 }
 local builtin = {BoxLayout = node("layout"), TextView = node("text"), EdgeRenderable = node("overlay"), Component = node("component"),
+    FloatingLayout = node("floating"), FloatingLayoutChild = node("floatingChild"),
     Selector = node("selector"), LineViewer = node("lineViewer"), ActionDescriptor = node("action"),
     ActionTooltip = node("tooltip"),
     type = {Orientation = {Vertical = 1}, EdgeRenderable = {Edge = {new = function(geometry) return {geometry = geometry} end}},
@@ -104,7 +114,7 @@ local messages = {}
 local log = {warning = function(message) warnings[#warnings + 1] = message end,
     message = function(message) messages[#messages + 1] = message end}
 
-local function environment(reactApi, builtins, tips, panel, buttonApi)
+local function environment(reactApi, builtins, tips, panel, buttonApi, store)
     local env, cache = nil, {}
     local doubles = {
         ["/react.lua"] = reactApi, ["/builtin.lua"] = builtins, ["manager_tooltips_util.tl"] = tips,
@@ -112,7 +122,7 @@ local function environment(reactApi, builtins, tips, panel, buttonApi)
         ["lang_util.tl"] = langUtil, ["app_util.tl"] = {isGamepadInputMode = function() return false end},
         ["hud_react_util.tl"] = {makeDefaultLineViewerSnapFactors = function() return {view = 0.05, world = 10} end},
     }
-    env = setmetatable({api = api, log = log, _ = function(text) return text end, ug_require = function(path)
+    env = setmetatable({api = api, log = log, _react = store, _ = function(text) return text end, ug_require = function(path)
         local own = path:match("^easier_waypoints::/plugins/easier_waypoints/(.+)$")
         if own then
             cache[own] = cache[own] or assert(loadfile(root .. own, "t", env))()
@@ -126,7 +136,7 @@ local function environment(reactApi, builtins, tips, panel, buttonApi)
     return env
 end
 
-local env = environment(react, builtin, tooltips, nativePanel, buttons)
+local env = environment(react, builtin, tooltips, nativePanel, buttons, registryStore)
 assert(loadfile(root .. "main.script.lua", "t", env))()
 local replacements = {}
 env.data().install({ReplaceRecipe = function(original, replacement) replacements[original] = replacement end})
@@ -158,6 +168,33 @@ noWorldGraphics(result)
 assert(not replacements[tooltips.LMAddWaypoint] and not replacements[tooltips.LMMoveWaypointTarget],
     "Other native tooltips are left alone")
 
+-- Waypoint rows in the stop list get text; stop rows stay exactly native.
+local StopRow = registry.EasierWaypointsStopItem
+assert(registryStore.recipeReplace[501] == StopRow and registryStore.recipeReplace[999] == nil,
+    "Only the private stop row is replaced, by name")
+entities[1].name = "Ring Road"
+local rowPath = {{stop = {stationGroup = 10}},
+    {waypoint = {edgePos = {edgeId = {entity = 1, index = 1}, param = 0.5}}},
+    {waypoint = {edgePos = {edgeId = {entity = 1, index = 0}, param = 0.5}}},
+    {waypoint = {edgePos = {edgeId = {entity = 2, index = 0}, param = 0.5}}},
+    {waypoint = {pos = vec(1, 2, 0)}}}
+local rowLine = {carriers = {road = true}}
+local function row(n, carriers)
+    rowLine.carriers = carriers or {road = true}
+    return StopRow.fn({stopNumber = n, viaState = {old = function() return rowPath end},
+        commonParams = {lineState = {old = function() return rowLine end}}})
+end
+local function rowText(r) return r.children[2].item.layout.children[1].text end
+assert(row(1).kind == "nativeRow", "Stop rows are returned untouched")
+local waypointRow = row(2)
+assert(waypointRow.kind == "floating" and waypointRow.children[1].item.kind == "nativeRow"
+    and waypointRow.children[2].item.meta.mouseTransparent, "Label floats over the native row without taking clicks")
+assert(rowText(waypointRow) == "Waypoint - Ring Road - heading north", "Road and heading")
+assert(rowText(row(3)) == "Waypoint - Ring Road - heading south", "The other side of the road heads the other way")
+assert(rowText(row(4)) == "Waypoint - either direction", "Tracks")
+assert(rowText(row(5, {water = true})) == "Waypoint - at sea" and rowText(row(5, {air = true})) == "Waypoint - in the air")
+entities[1].name = nil
+
 -- Stop panel: one compact waypoint button; the stretch native addWaypoint will edit is in its tooltip.
 local added, pushed, popped = {}, 0, 0
 local actionFn
@@ -182,6 +219,7 @@ stackApi = {
         pushed = pushed + 1
         tool.push(entry.ctx, param)
     end,
+    getActiveTool = function() return stack[#stack].tool end,
     pop = function(tool)
         local entry = stack[#stack]
         if entry.tool ~= tool then return end
@@ -250,6 +288,8 @@ end
 mode = {"SEGMENT", nil} -- the Line Manager's state after a waypoint was moved
 waypointButton(replacements[nativePanel].fn(params)).onClick()
 assert(pushed == 1 and actionFn and manager.shelved, "Button pushes the placement tool over the shelved Line Manager")
+waypointButton(replacements[nativePanel].fn(params)).onClick()
+assert(pushed == 1, "A second click while placing does not stack another tool")
 local descriptor, selector, tooltip = render()
 assert(selector.lineViewerSupport and find(descriptor.children, "lineViewer").preferLineOverTransportNetworkEdge == true,
     "Lane lines pick the drawn route first, so it can be clicked")
@@ -275,6 +315,8 @@ for i = 1, 3 do
     assert(line.path[2 + i].waypoint.edgePos == snaps[i], "Consecutive clicks keep their order along the line")
 end
 assert(added[1].insertAt == nil and added[2].insertAt == 3 and added[3].insertAt == 4, "Each click follows the last one")
+assert(#sounds == 3 and sounds[1] == "click.wav" and soundSets[#soundSets] == "::/gui/sound/gui_comp_sfx.gres",
+    "A soft interface click, not the add-waypoint chime")
 
 -- Clicking the drawn route adds the waypoint to that leg, on the lane nearest the cursor.
 assert(mode[2] == 5, "The selected stretch follows the last placement")
@@ -290,6 +332,8 @@ assert(find(descriptor.children, "overlay") and routeSnap.edgeId.entity == 1 and
 local queries = edgeQueries
 cursor = vec(1.9, 20, 0)
 stepFn()
+assert(#shownWindows == 1 and shownWindows[1][1] == "menu.management" and shownWindows[1][2] == true,
+    "The Line Manager stays visible while placing, set once")
 assert(edgeQueries == queries, "Small cursor jitter does not search again")
 cursor = vec(-1.5, 20, 0)
 stepFn()
@@ -440,10 +484,24 @@ assert(#cssEnv.data() == #selectors and #selectors > 0)
 local styled = table.concat(selectors, "\n")
 for _, selector in ipairs(selectors) do
     for part in selector:gmatch("[^,]+") do
-        assert(part:match("^%s*R::EasierWaypointsPanel "), "Scoped to the mod's panel: " .. part)
+        assert(part:match("^%s*R::EasierWaypointsPanel ") or part:match("^%s*R::EasierWaypointsStopItem "),
+            "Scoped to the mod's own nodes: " .. part)
     end
 end
-assert(styled:find("!ew-waypoint-row", 1, true) and styled:find("Button!ew-add-waypoint", 1, true), "Panel classes are styled")
+assert(styled:find("!ew-waypoint-row", 1, true) and styled:find("Button!ew-add-waypoint", 1, true)
+    and styled:find("!ew-waypoint-label", 1, true), "Panel and row classes are styled")
+
+-- If the registry is missing or another mod already replaced the row, rows stay native.
+for _, store in ipairs({false, {recipes = {[501] = function() end}, originalRecipeFn = {[501] = nativeRow},
+        recipeReplace = {[501] = function() end}, recipeReplacementAllowed = true}}) do
+    local otherEnv = environment(react, builtin, tooltips, nativePanel, buttons, store or nil)
+    assert(loadfile(root .. "main.script.lua", "t", otherEnv))()
+    local before = #warnings
+    otherEnv.data().install({ReplaceRecipe = function() end})
+    assert(#warnings == before + 1 and warnings[#warnings]:find("waypoint row text unavailable", 1, true),
+        "Row patch declines and says why, once")
+    assert(not store or store.recipeReplace[501] ~= registry.EasierWaypointsStopItem, "Another mod's row is left alone")
+end
 print("PASS: UI delegation, mode-aware guidance, placement tool, invalid-data fallback and no simulation commands")
 
 -- Optional: execute the actual shipped Lua recipe registry with opaque node IDs.
@@ -481,10 +539,16 @@ end}
 local function original(name) return realReact.RegisterRecipe(name, function() return realBuiltin.BoxLayout {children = {}} end) end
 local realTips = {LMAddWaypoint = original("NativeAdd"), LMPromptWaypointModifier = original("NativePrompt"), LMMoveWaypointTarget = original("NativeMove")}
 local realPanel = original("NativePanel")
-local realEnv = environment(realReact, realBuiltin, realTips, realPanel, realButtons)
+local realRow = original("LineStopItem")
+recipeIdFor = hostApi.gui.react.detail.makeRecipeId
+local realEnv = environment(realReact, realBuiltin, realTips, realPanel, realButtons, store)
 assert(loadfile(root .. "main.script.lua", "t", realEnv))()
 realEnv.data().install({ReplaceRecipe = realReact.GloballyReplaceRecipeBeforeInitInternal})
 assert(store.tools.EasierWaypointsPlacement, "Placement tool registered in the shipped registry")
+local rowId = realReact.GetRecipeId(realRow)
+local rowReplacement = store.recipeReplace[rowId]
+assert(rowReplacement and realReact.GetRecipeName(rowReplacement) == "EasierWaypointsStopItem",
+    "The private row is replaced by name in the shipped registry")
 local context = {}
 function context:makeNodeWithProps(recipeId, _, props)
     nodes[#nodes + 1] = {recipeId = recipeId, props = props}

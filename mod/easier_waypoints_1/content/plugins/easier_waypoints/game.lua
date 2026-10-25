@@ -232,6 +232,48 @@ function M.tooltipText(text)
     return builtin.TextView {meta = {class = TOOLTIP_CLASS}, text = text}
 end
 
+local HEADINGS = {
+    north = function() return _("north") end, ["north-east"] = function() return _("north-east") end,
+    east = function() return _("east") end, ["south-east"] = function() return _("south-east") end,
+    south = function() return _("south") end, ["south-west"] = function() return _("south-west") end,
+    west = function() return _("west") end, ["north-west"] = function() return _("north-west") end,
+}
+local LABEL_CACHE_LIMIT = 512
+local labels, labelCount = {}, 0
+
+-- Stop-list text for a waypoint row, e.g. "Waypoint - Ring Road - heading north-east".
+function M.waypointLabel(waypoint, carriers)
+    if waypoint.pos then
+        if carriers.AIR then return _("Waypoint - in the air") end
+        if carriers.WATER then return _("Waypoint - at sea") end
+        return _("Waypoint")
+    end
+    local snap = waypoint.edgePos
+    local entity = snap and snap.edgeId and snap.edgeId.entity
+    if not entity or not api.engine.entityExists(entity) then return _("Waypoint") end
+    local key = tostring(entity) .. ":" .. tostring(snap.edgeId.index) .. ":" .. string.format("%.3f", snap.param)
+    if labels[key] then return labels[key] end
+    local road = api.engine.util.getEntityName(entity)
+    if type(road) ~= "string" or road == "" then road = nil end
+    local ok, preview = pcall(direction.preview, {edgePos = snap}, M.backend)
+    local heading = ok and preview and preview.direction == "forward" and direction.compass(preview.tangent)
+    local both = ok and preview and preview.direction == "both"
+    local label
+    if heading then
+        local values = {road = road, heading = HEADINGS[heading]()}
+        label = road and langUtil.format(_("Waypoint - {road} - heading {heading}"), values)
+            or langUtil.format(_("Waypoint - heading {heading}"), values)
+    elseif both then
+        label = road and langUtil.format(_("Waypoint - {road} - either direction"), {road = road})
+            or _("Waypoint - either direction")
+    else
+        label = road and langUtil.format(_("Waypoint - {road}"), {road = road}) or _("Waypoint")
+    end
+    if labelCount >= LABEL_CACHE_LIMIT then labels, labelCount = {}, 0 end
+    labels[key], labelCount = label, labelCount + 1
+    return label
+end
+
 function M.stopName(path, index)
     local entity = path[index] and path[index].stop and path[index].stop.stationGroup
     if entity and api.engine.entityExists(entity) then

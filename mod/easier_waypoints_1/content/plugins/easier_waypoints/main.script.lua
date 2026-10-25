@@ -3,6 +3,7 @@ local builtin = ug_require "::/gui/main/builtin.lua"
 local buttons = ug_require "::/gui/main/button_react_util.tl"
 local tooltips = ug_require "::/gui/line_vehicle_mgmt/manager_tooltips_util.tl"
 local nativePanel = ug_require "::/gui/line_vehicle_mgmt/line_manager_panel.tl"
+local lineUtil = ug_require "::/gui/line_vehicle_mgmt/line_util.tl"
 local game = ug_require "easier_waypoints::/plugins/easier_waypoints/game.lua"
 local placement = ug_require "easier_waypoints::/plugins/easier_waypoints/placement.lua"
 
@@ -55,6 +56,51 @@ local Panel = react.RegisterRecipe("EasierWaypointsPanel", function(params)
     return vertical(children)
 end)
 
+-- Waypoint rows in the stop list are blank: the row text field only names stops.
+-- The row recipe is private to the stop list, so it is replaced through the React
+-- registry by name (operator-approved exception). If the registry is not as
+-- expected or another mod already replaced the row, rows stay native.
+local STOP_ROW = "LineStopItem"
+local originalRow
+
+local function rowLabel(params)
+    local path = params.viaState and params.viaState:old()
+    local via = path and path[params.stopNumber]
+    if not via or not via.waypoint then return nil end
+    local line = params.commonParams and params.commonParams.lineState and params.commonParams.lineState:old()
+    return game.waypointLabel(via.waypoint, game.lineCarriers(line and lineUtil.getLineCarriers(line)))
+end
+
+local StopRow = react.RegisterRecipe("EasierWaypointsStopItem", function(params)
+    local native = originalRow(params)
+    local ok, label = pcall(rowLabel, params)
+    if not ok then game.warnOnce("stop row label failed", label) end
+    -- Stop rows are returned untouched so their layout is exactly native.
+    if not ok or not label then return native end
+    return builtin.FloatingLayout {meta = {class = "ew-waypoint-row-layout"}, children = {
+        builtin.FloatingLayoutChild {h = -1, v = -1, item = native},
+        builtin.FloatingLayoutChild {h = 0, v = 0.5, item = builtin.Component {
+            meta = {class = "ew-waypoint-label", mouseTransparent = true},
+            layout = builtin.BoxLayout {children = {builtin.TextView {meta = {class = "font-scale-body"}, text = label}}},
+        }},
+    }}
+end)
+
+local function replacePrivateRow()
+    local registry = _react
+    local detail = api.gui.react and api.gui.react.detail
+    if type(registry) ~= "table" or not detail or not detail.makeRecipeId then return "registry unavailable" end
+    local id = detail.makeRecipeId(STOP_ROW)
+    if not (registry.recipes and registry.recipes[id] and registry.originalRecipeFn and registry.originalRecipeFn[id]) then
+        return "stop row recipe not found"
+    end
+    if not registry.recipeReplace or registry.recipeReplace[id] then return "stop row already replaced" end
+    if registry.recipeReplacementAllowed == false then return "replacement window closed" end
+    originalRow = registry.originalRecipeFn[id]
+    registry.recipeReplace[id] = StopRow
+    return nil
+end
+
 local replacements = {
     {tooltips.LMPromptWaypointModifier, Prompt},
     {nativePanel, Panel},
@@ -66,6 +112,8 @@ function data()
             for _, pair in ipairs(replacements) do
                 replacementApi.ReplaceRecipe(pair[1], pair[2])
             end
+            local ok, problem = pcall(replacePrivateRow)
+            if not ok or problem then game.warnOnce("waypoint row text unavailable", ok and problem or tostring(problem)) end
         end,
     }
 end

@@ -134,6 +134,18 @@ function M.arrowSegments(preview)
     return result
 end
 
+-- Eight-point heading of a ground-plane direction, assuming +x east and +y north.
+function M.compass(tangent)
+    local t = xyz(tangent)
+    if not t or (t.x == 0 and t.y == 0) then return nil end
+    local ax, ay, slope = math.abs(t.x), math.abs(t.y), 0.41421356 -- tan(22.5°)
+    local northSouth = t.y >= 0 and "north" or "south"
+    local eastWest = t.x >= 0 and "east" or "west"
+    if ay <= ax * slope then return eastWest end
+    if ax <= ay * slope then return northSouth end
+    return northSouth .. "-" .. eastWest
+end
+
 function M.validPoint(position)
     return xyz(position) ~= nil
 end

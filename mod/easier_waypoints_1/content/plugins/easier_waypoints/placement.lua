@@ -14,6 +14,7 @@ local ROUTE_SEARCH_RADIUS = 20
 local ROUTE_LANE_DISTANCE = 8
 local ROUTE_FOLLOW_DISTANCE = 0.75
 local CLICK_SLOP = 4 -- pixels a right click may move before it counts as a camera drag
+local MANAGER_WINDOW = "menu.management"
 
 local function append(list, item)
     if item ~= nil then list[#list + 1] = item end
@@ -156,8 +157,9 @@ local function place(param, aim)
     state.common.addWaypoint(waypoint, stretchMode(state, aim))
     param.placedKey = aim.key
     pcall(function()
-        local sounds = api.gui.genericRep.get(api.gui.genericRep.find("::/gui/line_vehicle_mgmt/sound/lvm_sfx.gres")).data
-        api.gui.sound.playRandomSoundEffect(sounds.AddWaypoint)
+        -- A soft interface click rather than the louder add-waypoint chime.
+        local sounds = api.gui.genericRep.get(api.gui.genericRep.find("::/gui/sound/gui_comp_sfx.gres")).data
+        api.gui.sound.playRandomSoundEffect(sounds.ButtonClick)
     end)
     return true
 end
@@ -304,6 +306,11 @@ local function action(param, ctx)
     -- The route pick only changes with the leg, so the lane follows the cursor
     -- across the road on each update; that is how a side of the road is chosen.
     react.onStep(guarded("cursor follow", function()
+        -- Opening a tool hides the Line Manager; keep it visible to watch the stop list grow.
+        if not param.managerShown then
+            param.managerShown = true
+            api.gui.byId.setVisible(MANAGER_WINDOW, true)
+        end
         local current = aimState:old()
         if not current or not current.route then return end
         if not moved(current.cursor, game.backend.cursorPosition()) then return end
@@ -365,7 +372,9 @@ function M.start(common)
     local entity = line and line.entityAndRevision and line.entityAndRevision.entity
     local stack = common.gameCtx and common.gameCtx.toolStack and common.gameCtx.toolStack:get()
     if not entity or not stack then return false end
-    stack:getApi().push(M.Tool, nil, {commonParams = common, line = entity}, true)
+    local toolStack = stack:getApi()
+    if toolStack.getActiveTool and toolStack.getActiveTool() == M.Tool then return false end
+    toolStack.push(M.Tool, nil, {commonParams = common, line = entity}, true)
     return true
 end
 
