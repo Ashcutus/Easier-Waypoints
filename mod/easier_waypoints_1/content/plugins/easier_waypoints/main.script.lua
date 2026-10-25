@@ -43,8 +43,9 @@ local function panelState(common)
     local line = common.lineState and common.lineState:old()
     local mode = common.getModeState()
     if not line or not line.path or not mode or mode[1] ~= "SEGMENT" then return nil end
+    -- One literal per message so translation extraction can find it.
     local text = game.stretchText(line, mode[2],
-        _("Adds a waypoint between {from} and {to}. Point at the route to choose another part of the line."))
+        _("Adds waypoints between {from} and {to}, with a lane and direction preview. Click the route to choose another part of the line. Right-click or press Esc to finish."))
     if not text then return {enabled = false, tooltip = _("Select a stretch of the line first.")} end
     return {enabled = true, tooltip = text}
 end

@@ -12,6 +12,8 @@ local M = {}
 local NAME = "EasierWaypointsPlacement"
 local ROUTE_SEARCH_RADIUS = 20
 local ROUTE_LANE_DISTANCE = 8
+local ROUTE_FOLLOW_DISTANCE = 0.75
+local CLICK_SLOP = 4 -- pixels a right click may move before it counts as a camera drag
 
 local function append(list, item)
     if item ~= nil then list[#list + 1] = item end
@@ -42,19 +44,31 @@ local function laneKey(snap)
 end
 
 -- A pick on the drawn route names the exact leg (stop and waypoint sub-segment)
--- but no lane, so the lane is the nearest usable one under the cursor.
+-- but no lane, so the lane is the nearest usable one under the cursor. The pick
+-- and cursor are kept so the lane can follow the cursor across the road.
 local function routeTarget(picked, state)
     if state.points or picked.entity ~= state.lineEntity or type(picked.stopNumber) ~= "number" then return nil end
     local after = game.stretch(state.line, picked.stopNumber)
     if not after then return nil end
     local position = game.backend.cursorPosition()
-    local lane = position and direction.nearestLane(position, game.backend.networksNear(position, ROUTE_SEARCH_RADIUS),
+    local lane = position and direction.nearestLane(position, game.backend.edgesNear(position, ROUTE_SEARCH_RADIUS),
         game.backend, state.carriers, ROUTE_LANE_DISTANCE)
-    if not lane then return {route = true, after = after, key = "route:" .. tostring(after) .. ":none"} end
+    local aim = {route = true, after = after, picked = picked, cursor = position}
+    if not lane then
+        aim.key = "route:" .. tostring(after) .. ":none"
+        return aim
+    end
     local snap = api.type.EdgePos.new()
     snap.edgeId = api.type.EdgeId.new(lane.entity, lane.index)
     snap.param = lane.param
-    return {route = true, after = after, snap = snap, key = "route:" .. tostring(after) .. ":" .. laneKey(snap)}
+    aim.snap = snap
+    aim.key = "route:" .. tostring(after) .. ":" .. laneKey(snap)
+    return aim
+end
+
+local function moved(from, to)
+    if not from or not to then return from ~= to end
+    return (from.x - to.x) ^ 2 + (from.y - to.y) ^ 2 > ROUTE_FOLLOW_DISTANCE ^ 2
 end
 
 local function target(details, state)
@@ -130,27 +144,21 @@ local function place(param, aim)
     return true
 end
 
--- drawn is false when the candidate should have an overlay but none could be built.
+-- Only shown when there is something to say: nothing while idle, the leg while
+-- aiming, and a problem or a direction caveat when there is one. The highlight
+-- and arrow already show a confirmed direction. drawn is false when the
+-- candidate should have an overlay but none could be built.
 local function tooltipParam(state, aim, candidate, drawn)
-    local finish = _("Right-click or press Esc to finish.")
     if not state then
-        return {hint = _("This line is no longer being edited.") .. " " .. finish}
+        return {problem = _("This line is no longer being edited. Right-click or press Esc to finish.")}
     end
-    local result = {stretch = game.stretchText(state.line, stretchMode(state, aim), _("Adds a waypoint between {from} and {to}."))}
-    if candidate then
-        result.problem = candidate.problem
-        if not drawn then
-            result.detail = game.previewUnavailableText(candidate.pos ~= nil, not candidate.problem)
-        elseif candidate.preview then
-            result.detail = game.directionText(candidate.preview)
-        end
-        result.hint = candidate.problem and finish or (_("Click to add it here.") .. " " .. finish)
-    elseif state.carriers.AIR then
-        result.hint = _("Point at the place the aircraft should fly over.") .. " " .. finish
-    elseif state.points then
-        result.hint = _("Point at the water the ship should pass through.") .. " " .. finish
-    else
-        result.hint = _("Point at the line's route or at a lane. The other side of a road runs the other way.") .. " " .. finish
+    if not candidate then return nil end
+    if candidate.problem then return {problem = candidate.problem} end
+    local result = {stretch = game.stretchText(state.line, stretchMode(state, aim), _("Between {from} and {to}"))}
+    if not drawn then
+        result.detail = game.previewUnavailableText(candidate.pos ~= nil, true)
+    elseif candidate.preview and candidate.preview.direction ~= "forward" then
+        result.detail = game.directionText(candidate.preview)
     end
     return result
 end
@@ -160,7 +168,6 @@ local Tooltip = react.RegisterRecipe("EasierWaypointsPlacementTooltip", function
     if param.stretch then append(children, game.tooltipText(param.stretch)) end
     if param.problem then append(children, game.tooltipText(param.problem)) end
     if param.detail then append(children, game.tooltipText(param.detail)) end
-    if param.hint then append(children, game.tooltipText(param.hint)) end
     return builtin.BoxLayout {orientation = builtin.type.Orientation.Vertical, children = children}
 end)
 
@@ -246,8 +253,44 @@ local function action(param, ctx)
         local chosen = target(convert(entity, details), session(param))
         return chosen ~= nil and place(param, chosen)
     end
+    -- A right click finishes; a right drag still belongs to the camera.
+    local function mouse(evt)
+        if evt.button ~= 2 then return false end
+        local types = api.gui.mouse.Event.Type
+        if evt.type == types.Pressed then
+            param.rightPress = {evt.x, evt.y}
+            return false
+        end
+        local press = param.rightPress
+        local still = press and math.abs(evt.x - press[1]) <= CLICK_SLOP and math.abs(evt.y - press[2]) <= CLICK_SLOP
+        if evt.type == types.Released then param.rightPress = nil end
+        if evt.type == types.Clicked or (evt.type == types.Released and still) then
+            close()
+            return true
+        end
+        return false
+    end
 
-    react.useInputAction("IA_MENU_BACK", react.iaHandler(close, function() return true end, _("Finish")))
+    -- The route pick only changes with the leg, so the lane follows the cursor
+    -- across the road on each update; that is how a side of the road is chosen.
+    react.onStep(function()
+        local current = aimState:old()
+        if param.closed or not current or not current.route then return end
+        if not moved(current.cursor, game.backend.cursorPosition()) then return end
+        local live = session(param)
+        local followed = live and routeTarget(current.picked, live)
+        if not followed then return end
+        if followed.key ~= current.key then
+            aimState:set(followed)
+        else
+            current.cursor = followed.cursor -- same lane: remember where the search ran, no re-render
+        end
+    end)
+
+    local enabled = function() return true end
+    -- IA_CLOSE_TOPMOST_WINDOW keeps native back handlers from swallowing Escape.
+    react.useInputAction("IA_CLOSE_TOPMOST_WINDOW", react.iaHandler(close, enabled, _("Finish")))
+    react.useInputAction("IA_MENU_BACK", react.iaHandler(close, enabled, _("Finish")))
     react.useInputAction("IA_SELECT", react.iaHandler(function()
         local current = aimState:old()
         if current then place(param, current) end
@@ -258,13 +301,15 @@ local function action(param, ctx)
     append(children, builtin.Selector {
         onHover = hover,
         onSelect = choose,
+        onProcessMouseEvent = mouse,
         filter = selectable,
         lineViewerSupport = true,
         stopOnMenuBack = false,
     })
     local overlayNode, drawn = overlay(candidate)
     append(children, overlayNode)
-    append(children, builtin.ActionTooltip {recipe = Tooltip, param = tooltipParam(state, aim, candidate, drawn)})
+    local tip = tooltipParam(state, aim, candidate, drawn)
+    if tip then append(children, builtin.ActionTooltip {recipe = Tooltip, param = tip}) end
     return builtin.ActionDescriptor {
         children = children,
         onBack = close,

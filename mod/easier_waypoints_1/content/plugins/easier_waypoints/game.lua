@@ -81,9 +81,10 @@ M.backend = {
         if not api.gui.mouse.hasTerrainPosition() then return nil end
         return api.gui.mouse.getTerrainPosition()
     end,
-    networksNear = function(position, radius)
+    -- Street and track edges near a point, queried like the game's own tutorial.
+    edgesNear = function(position, radius)
         return api.engine.util.octree.findEntitiesInCircle(api.type.Vec2f.new(position.x, position.y), radius,
-            api.type.ComponentType.TRANSPORT_NETWORK) or {}
+            api.type.ComponentType.BASE_EDGE) or {}
     end,
 }
 

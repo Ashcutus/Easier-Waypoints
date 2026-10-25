@@ -21,9 +21,11 @@ Code was checked against Linux Steam preview build 26129055. 0.2.0 stays
   Each click adds the next waypoint in order; right-click or Esc finishes. No
   modifier key is needed.
 - **Click the route** in the placement tool to add a waypoint to that part of the
-  line. The game reports which leg was clicked; the waypoint goes on the nearest
-  lane the line can use, previewed before the click. Ships and aircraft place free
-  points instead.
+  line. The game reports which leg was clicked; the waypoint goes on the lane
+  nearest the cursor, previewed before the click. Move across the road to pick the
+  other side: the highlight and arrow follow. Ships and aircraft place free points.
+- The tool's tooltip only appears when it has something to say: the leg while
+  aiming, or a problem or direction caveat.
 - The native flow still works. Its tooltips now say that the key shown in the
   game's own prompt must be held while clicking, and they explain direction.
   All text is plain; key-hint markup did not render in the stop panel.
@@ -71,9 +73,10 @@ Smoke test, in order:
    match real traffic on each side.
 3. Place three distinct waypoints and check they appear in that order in the stop
    list, each on the highlighted lane, with hovering editing nothing.
-4. Click the route on a different part of the line and check the waypoint lands in
-   that part, on the previewed lane.
-5. Press Esc and check the Line Manager returns with the line and stretch intact.
+4. Point at the route on a different part of the line, move across the road to
+   switch side, click, and check the waypoint lands in that part on that side.
+5. Right-click (or press Esc) and check the Line Manager returns with the line and
+   stretch intact; a right-drag should still rotate the camera.
 6. Then: ship and aircraft placement, gamepad input and stop-list focus.
 
 Further checks: one-way and tram streets, junction approaches and tracks; whether

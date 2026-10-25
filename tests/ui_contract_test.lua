@@ -18,6 +18,7 @@ local entities = {
 }
 local exists = true
 local cursor -- ground point under the mouse, or nil
+local edgeQueries = 0
 local api = {
     type = {ComponentType = {BASE_EDGE = "base", BASE_EDGE_STREET = "street", BASE_NODE = "node",
             TRANSPORT_NETWORK = "network", TOWN_BUILDING = "town", TRANSPORT_VEHICLE = "vehicle", WORLD = "world", LINE = "line"},
@@ -39,7 +40,8 @@ local api = {
         end,
         util = {getEntityName = function(entity) return entities[entity] and entities[entity].name end,
             octree = {findEntitiesInCircle = function(center, radius, component)
-                assert(component == "network" and radius > 0)
+                assert(component == "base" and radius > 0, "Query street/track edges like the game's tutorial")
+                edgeQueries = edgeQueries + 1
                 local found = {}
                 for entity, e in pairs(entities) do
                     if e.network and math.abs(e.network.edges[1].geometry.x - center.x) < radius then found[#found + 1] = entity end
@@ -48,14 +50,15 @@ local api = {
                 return found
             end}}},
     gui = {SelectionDetails = {TransportNetworkEdge = {new = function() return {} end}},
-        mouse = {hasTerrainPosition = function() return cursor ~= nil end, getTerrainPosition = function() return cursor end},
+        mouse = {hasTerrainPosition = function() return cursor ~= nil end, getTerrainPosition = function() return cursor end,
+            Event = {Type = {Pressed = "pressed", Released = "released", Clicked = "clicked"}}},
         genericRep = {find = function() return 1 end, get = function() return {data = {AddWaypoint = {"add.wav"}}} end},
         sound = {playRandomSoundEffect = function() end}},
     cmd = setmetatable({}, {__index = function() error("UI code must never issue commands directly") end}),
 }
 
 local registry, tools = {}, {}
-local hooks, hookIndex, inputActions = {}, 0, {}
+local hooks, hookIndex, inputActions, stepFn = {}, 0, {}, nil
 local react = {
     RegisterRecipe = function(name, fn) local recipe = {name = name, fn = fn}; registry[name] = recipe; return recipe end,
     CallOriginalRecipe = function(original, param) return {kind = "original", recipe = original, param = param} end,
@@ -69,6 +72,7 @@ local react = {
         return hooks[hookIndex]
     end,
     useInputAction = function(key, handler) inputActions[key] = handler end,
+    onStep = function(fn) stepFn = fn end,
     iaHandler = function(fn, enabled, text) return {fn = fn, enabled = enabled, text = text} end,
 }
 local builtin = {BoxLayout = node("layout"), TextView = node("text"), EdgeRenderable = node("overlay"), Component = node("component"),
@@ -262,8 +266,7 @@ assert(pushed == 1 and actionFn and manager.shelved, "Button pushes the placemen
 local descriptor, selector, tooltip = render()
 assert(selector.lineViewerSupport and find(descriptor.children, "lineViewer").preferLineOverTransportNetworkEdge == true,
     "Lane lines pick the drawn route first, so it can be clicked")
-assert(not find(descriptor.children, "overlay") and tooltip.param.stretch == "Adds a waypoint between Station 10 and Station 20.")
-assert(tooltip.param.hint:find("route", 1, true) and tooltip.param.hint:find("Esc", 1, true), "Idle hint names both ways in and out")
+assert(not find(descriptor.children, "overlay") and not tooltip, "Nothing to say while idle: no tooltip")
 local snaps = {}
 for i, param in ipairs({0.2, 0.5, 0.8}) do
     snaps[i] = {edgeId = {entity = 1, index = 1}, param = param}
@@ -272,8 +275,8 @@ for i, param in ipairs({0.2, 0.5, 0.8}) do
     descriptor, selector, tooltip = render()
     overlay = find(descriptor.children, "overlay")
     assert(overlay and #overlay.edges == 4, "Overlay is a direct ActionDescriptor child")
-    assert(tooltip.param.detail:find("direction of travel", 1, true) and not tooltip.param.problem)
-    assert(tooltip.param.stretch == "Adds a waypoint between Station 10 and Station 20.", "Every click stays in the stretch")
+    assert(tooltip.param.stretch == "Between Station 10 and Station 20" and not tooltip.param.detail and not tooltip.param.problem,
+        "A confirmed direction needs only the leg; the arrow shows the rest")
     assert(find(descriptor.children, "lineViewer").snapPreview.snap == snaps[i])
     assert(selector.onSelect(1, {}, {transportNetworkEdge = {snap = snaps[i]}}) == true)
     inputActions.IA_SELECT.fn()
@@ -286,17 +289,31 @@ for i = 1, 3 do
 end
 assert(added[1].insertAt == nil and added[2].insertAt == 3 and added[3].insertAt == 4, "Each click follows the last one")
 
--- Clicking the drawn route adds the waypoint to that leg, on the nearest usable lane.
+-- Clicking the drawn route adds the waypoint to that leg, on the lane nearest the cursor.
 assert(mode[2] == 5, "The selected stretch follows the last placement")
 cursor = vec(1.5, 20, 0)
 local returnLeg = {line = {entity = 77, stopNumber = 6}} -- Station 20 back to Station 10
 selector.onHover(77, {}, returnLeg)
 descriptor, selector, tooltip = render()
-assert(tooltip.param.stretch == "Adds a waypoint between Station 20 and Station 10.", "The hovered leg, not the selected stretch")
+assert(tooltip.param.stretch == "Between Station 20 and Station 10", "The hovered leg, not the selected stretch")
 local routeSnap = find(descriptor.children, "lineViewer").snapPreview.snap
 assert(find(descriptor.children, "overlay") and routeSnap.edgeId.entity == 1 and routeSnap.edgeId.index == 1
     and routeSnap.param == 0.5, "Nearest usable lane under the cursor is previewed")
-assert(tooltip.param.detail:find("direction of travel", 1, true) and inputActions.IA_SELECT.enabled())
+-- The route pick does not change while crossing the road, so the lane follows the cursor each update.
+local queries = edgeQueries
+cursor = vec(1.9, 20, 0)
+stepFn()
+assert(edgeQueries == queries, "Small cursor jitter does not search again")
+cursor = vec(-1.5, 20, 0)
+stepFn()
+descriptor, selector, tooltip = render()
+routeSnap = find(descriptor.children, "lineViewer").snapPreview.snap
+local arrow = find(descriptor.children, "overlay").edges[2].geometry.straight.pos
+assert(routeSnap.edgeId.index == 0 and arrow[2].y < arrow[1].y, "Crossing the road picks the other side and flips the arrow")
+cursor = vec(1.5, 20, 0)
+stepFn()
+descriptor, selector, tooltip = render()
+assert(find(descriptor.children, "lineViewer").snapPreview.snap.edgeId.index == 1, "And back again")
 assert(selector.onSelect(77, {}, returnLeg) == true)
 inputActions.IA_SELECT.fn()
 local routed = line.path[7] and line.path[7].waypoint and line.path[7].waypoint.edgePos
@@ -313,7 +330,7 @@ descriptor, selector, tooltip = render()
 assert(tooltip.param.problem:find("No lane found", 1, true), "No ground position: refuse rather than guess")
 selector.onHover(99, {}, {line = {entity = 99, stopNumber = 1}})
 descriptor, selector, tooltip = render()
-assert(not tooltip.param.problem and not find(descriptor.children, "overlay"), "Other lines' routes are ignored")
+assert(not tooltip and not find(descriptor.children, "overlay"), "Other lines' routes are ignored")
 assert(#added == 4)
 
 -- A preview that cannot be drawn is reported once and described honestly.
@@ -345,7 +362,7 @@ assert(tooltip.param.problem == "Ship waypoints must be on water." and descripto
 assert(find(descriptor.children, "lineViewer").preferLineOverTransportNetworkEdge == false, "Ships pick free points")
 selector.onHover(5, {}, {world = {pos = vec(0/0, 9, 0), water = true}})
 descriptor, selector, tooltip = render()
-assert(tooltip.param.problem:find("couldn't be read", 1, true) and not tooltip.param.detail:find("Clicking", 1, true),
+assert(tooltip.param.problem:find("couldn't be read", 1, true) and not tooltip.param.detail,
     "An unreadable point is refused, not offered as clickable")
 selector.onHover(5, {}, {world = {pos = vec(9, 9, 0), water = true}})
 descriptor, selector = render()
@@ -361,11 +378,22 @@ assert(tooltip.param.problem == "Too close to another waypoint." and #added == 5
 tooClose = false
 mode = {"MOVE_STOP", {}}
 descriptor, selector, tooltip = render()
-assert(tooltip.param.hint:find("no longer being edited", 1, true) and not find(descriptor.children, "overlay"))
+assert(tooltip.param.problem:find("no longer being edited", 1, true) and not find(descriptor.children, "overlay"))
 mode = finalMode
+
+-- Finishing: a right drag belongs to the camera, a right click closes the tool once.
+assert(inputActions.IA_CLOSE_TOPMOST_WINDOW and inputActions.IA_MENU_BACK, "Escape is captured before native back handlers")
+local mouse = selector.onProcessMouseEvent
+assert(mouse({type = "pressed", button = 0, x = 0, y = 0}) == false, "Left button untouched")
+assert(mouse({type = "pressed", button = 2, x = 100, y = 100}) == false, "A right press may start a camera drag")
+assert(mouse({type = "released", button = 2, x = 160, y = 120}) == false and popped == 0, "A right drag does not close")
+mouse({type = "pressed", button = 2, x = 100, y = 100})
+assert(mouse({type = "released", button = 2, x = 102, y = 101}) == true and popped == 1, "A right click closes")
+mouse({type = "clicked", button = 2, x = 102, y = 101})
+inputActions.IA_CLOSE_TOPMOST_WINDOW.fn()
 inputActions.IA_MENU_BACK.fn()
 descriptor.onBack()
-assert(popped == 1 and #stack == 1, "Back pops the tool exactly once")
+assert(popped == 1 and #stack == 1, "Closing happens exactly once")
 assert(not manager.shelved and mode == finalMode and #line.path == 8, "The Line Manager returns with its state intact")
 
 -- The stylesheet only styles this mod's panel row, never native widgets elsewhere.
