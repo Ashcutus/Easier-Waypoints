@@ -7,6 +7,8 @@ local direction = ug_require "easier_waypoints::/plugins/easier_waypoints/direct
 local game = ug_require "easier_waypoints::/plugins/easier_waypoints/game.lua"
 local placement = ug_require "easier_waypoints::/plugins/easier_waypoints/placement.lua"
 
+game.reportRuntime()
+
 local function vertical(children)
     return builtin.BoxLayout {orientation = builtin.type.Orientation.Vertical, children = children}
 end
@@ -17,9 +19,10 @@ local function laneChildren(waypoint)
     local ok, preview = pcall(direction.preview, waypoint, game.backend)
     if not ok then game.warnOnce("tooltip lane data unreadable", preview) end
     if not ok or not preview then return {} end
-    local rendered, overlay = pcall(game.laneOverlay, preview, true)
+    local rendered, overlay, arrowsBuilt = pcall(game.laneOverlay, preview, true)
     if rendered and overlay then
-        return {game.tooltipText(game.directionText(preview)), overlay}
+        local detail = game.laneDetail(preview, arrowsBuilt)
+        return detail and {game.tooltipText(detail), overlay} or {overlay}
     end
     game.warnOnce("tooltip lane preview unavailable", rendered and "nothing to draw" or overlay)
     return {game.tooltipText(game.previewUnavailableText(false, false))}

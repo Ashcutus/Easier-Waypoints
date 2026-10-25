@@ -39,6 +39,18 @@ local function session(param)
     }
 end
 
+-- The game only ever copies lane references, so set fields when EdgeId.new is absent.
+local function makeSnap(lane)
+    local snap = api.type.EdgePos.new()
+    if api.type.EdgeId and api.type.EdgeId.new then
+        snap.edgeId = api.type.EdgeId.new(lane.entity, lane.index)
+    else
+        snap.edgeId.entity, snap.edgeId.index = lane.entity, lane.index
+    end
+    snap.param = lane.param
+    return snap
+end
+
 local function laneKey(snap)
     return tostring(snap.edgeId.entity) .. ":" .. tostring(snap.edgeId.index) .. ":" .. string.format("%.4f", snap.param)
 end
@@ -58,9 +70,13 @@ local function routeTarget(picked, state)
         aim.key = "route:" .. tostring(after) .. ":none"
         return aim
     end
-    local snap = api.type.EdgePos.new()
-    snap.edgeId = api.type.EdgeId.new(lane.entity, lane.index)
-    snap.param = lane.param
+    local built, snap = pcall(makeSnap, lane)
+    if not built then
+        game.warnOnce("route lane reference unavailable", snap)
+        aim.unbuildable = true
+        aim.key = "route:" .. tostring(after) .. ":unbuildable"
+        return aim
+    end
     aim.snap = snap
     aim.key = "route:" .. tostring(after) .. ":" .. laneKey(snap)
     return aim
@@ -99,6 +115,8 @@ local function evaluate(state, aim)
         elseif lineUtil.isWaypointTooClose(state.line, aim.pos, nil) then
             candidate.problem = _("Too close to another waypoint.")
         end
+    elseif aim.unbuildable then
+        candidate = {route = true, problem = _("Clicking the route isn't available in this game version. Point at the road or track itself.")}
     elseif aim.route and not aim.snap then
         candidate = {route = true, problem = _("No lane found under the route here. Point at the road or track itself.")}
     else
@@ -148,7 +166,7 @@ end
 -- aiming, and a problem or a direction caveat when there is one. The highlight
 -- and arrow already show a confirmed direction. drawn is false when the
 -- candidate should have an overlay but none could be built.
-local function tooltipParam(state, aim, candidate, drawn)
+local function tooltipParam(state, aim, candidate, drawn, arrowsBuilt)
     if not state then
         return {problem = _("This line is no longer being edited. Right-click or press Esc to finish.")}
     end
@@ -157,8 +175,8 @@ local function tooltipParam(state, aim, candidate, drawn)
     local result = {stretch = game.stretchText(state.line, stretchMode(state, aim), _("Between {from} and {to}"))}
     if not drawn then
         result.detail = game.previewUnavailableText(candidate.pos ~= nil, true)
-    elseif candidate.preview and candidate.preview.direction ~= "forward" then
-        result.detail = game.directionText(candidate.preview)
+    elseif candidate.preview then
+        result.detail = game.laneDetail(candidate.preview, arrowsBuilt)
     end
     return result
 end
@@ -216,7 +234,8 @@ local function lineViewer(param, state, aim, candidate)
     }
 end
 
--- Returns the overlay node and whether everything the candidate needs was drawn.
+-- Returns the overlay node, whether everything the candidate needs was drawn,
+-- and whether lane arrows could be built.
 local function overlay(candidate)
     local build
     if candidate and candidate.preview then
@@ -226,8 +245,8 @@ local function overlay(candidate)
     else
         return nil, true
     end
-    local ok, node = pcall(build)
-    if ok and node then return node, true end
+    local ok, node, arrowsBuilt = pcall(build)
+    if ok and node then return node, true, arrowsBuilt ~= false end
     game.warnOnce(candidate.pos and "placement marker unavailable" or "placement lane preview unavailable",
         ok and "nothing to draw" or node)
     return nil, false
@@ -243,6 +262,17 @@ local function action(param, ctx)
         if param.closed then return end
         param.closed = true
         ctx.popSelf()
+    end
+    -- Engine callbacks must never raise: an error repeats every frame. After the
+    -- tool closes its state expires, so callbacks then do nothing.
+    local function guarded(name, fn, fallback)
+        return function(...)
+            if param.closed or (aimState.hasExpired and aimState:hasExpired()) then return fallback end
+            local ok, result = pcall(fn, ...)
+            if ok then return result end
+            game.warnOnce("placement " .. name .. " failed", result)
+            return fallback
+        end
     end
     local function hover(entity, _indices, details)
         local hovered = target(convert(entity, details), session(param))
@@ -273,9 +303,9 @@ local function action(param, ctx)
 
     -- The route pick only changes with the leg, so the lane follows the cursor
     -- across the road on each update; that is how a side of the road is chosen.
-    react.onStep(function()
+    react.onStep(guarded("cursor follow", function()
         local current = aimState:old()
-        if param.closed or not current or not current.route then return end
+        if not current or not current.route then return end
         if not moved(current.cursor, game.backend.cursorPosition()) then return end
         local live = session(param)
         local followed = live and routeTarget(current.picked, live)
@@ -285,30 +315,30 @@ local function action(param, ctx)
         else
             current.cursor = followed.cursor -- same lane: remember where the search ran, no re-render
         end
-    end)
+    end))
 
     local enabled = function() return true end
     -- IA_CLOSE_TOPMOST_WINDOW keeps native back handlers from swallowing Escape.
     react.useInputAction("IA_CLOSE_TOPMOST_WINDOW", react.iaHandler(close, enabled, _("Finish")))
     react.useInputAction("IA_MENU_BACK", react.iaHandler(close, enabled, _("Finish")))
-    react.useInputAction("IA_SELECT", react.iaHandler(function()
+    react.useInputAction("IA_SELECT", react.iaHandler(guarded("select", function()
         local current = aimState:old()
         if current then place(param, current) end
-    end, function() return candidate ~= nil and not candidate.problem end, _("Add Waypoint")))
+    end), function() return candidate ~= nil and not candidate.problem end, _("Add Waypoint")))
 
     local children = {}
     append(children, lineViewer(param, state, aim, candidate))
     append(children, builtin.Selector {
-        onHover = hover,
-        onSelect = choose,
-        onProcessMouseEvent = mouse,
+        onHover = guarded("hover", hover),
+        onSelect = guarded("click", choose, false),
+        onProcessMouseEvent = guarded("mouse", mouse, false),
         filter = selectable,
         lineViewerSupport = true,
         stopOnMenuBack = false,
     })
-    local overlayNode, drawn = overlay(candidate)
+    local overlayNode, drawn, arrowsBuilt = overlay(candidate)
     append(children, overlayNode)
-    local tip = tooltipParam(state, aim, candidate, drawn)
+    local tip = tooltipParam(state, aim, candidate, drawn, arrowsBuilt)
     if tip then append(children, builtin.ActionTooltip {recipe = Tooltip, param = tip}) end
     return builtin.ActionDescriptor {
         children = children,

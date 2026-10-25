@@ -26,9 +26,8 @@ local api = {
             TRAM_TRACK = "TRAM_TRACK", ELECTRIC_TRAM_TRACK = "ELECTRIC_TRAM_TRACK", TRAIN = "TRAIN", ELECTRIC_TRAIN = "ELECTRIC_TRAIN"},
             Carrier = {ROAD = "road", TRAM = "tram", RAIL = "rail", WATER = "water", AIR = "air"}},
         Vec2f = {new = vec}, Vec3f = {new = vec}, Vec4f = {new = vec},
-        EdgeGeometry = {new = function() return {} end, Type = {STRAIGHT = 1}, Straight = {new = function() return {} end},
-            calcPos = function(g) return {{x = g.x, y = 20, z = 3}, {x = 0, y = 2 * g.dy, z = 0}} end,
-            locate = function(g, p) return {0.5, math.abs(g.x - p.x) < 25} end},
+        -- Only what the running game provides: no calcPos or locate here.
+        EdgeGeometry = {new = function() return {} end, Type = {STRAIGHT = 1}, Straight = {new = function() return {} end}},
         Waypoint = {new = function() return {tag = -1} end},
         EdgeId = {new = function(entity, index) return {entity = entity, index = index} end},
         EdgePos = {new = function() return {} end},
@@ -39,6 +38,8 @@ local api = {
             return ({network = e.network, base = e.base, street = e.street, world = e.world})[component]
         end,
         util = {getEntityName = function(entity) return entities[entity] and entities[entity].name end,
+            -- Lanes run along y through y = 20 at t = 0.5, in the direction of dy.
+            transport = {calcPosition = function(g, t) return {x = g.x, y = 20 + (t - 0.5) * 4 * g.dy, z = 3} end},
             octree = {findEntitiesInCircle = function(center, radius, component)
                 assert(component == "base" and radius > 0, "Search street and track edges")
                 edgeQueries = edgeQueries + 1
@@ -58,7 +59,7 @@ local api = {
 }
 
 local registry, tools = {}, {}
-local hooks, hookIndex, inputActions, stepFn = {}, 0, {}, nil
+local hooks, hookIndex, inputActions, stepFn, expired = {}, 0, {}, nil, false
 local react = {
     RegisterRecipe = function(name, fn) local recipe = {name = name, fn = fn}; registry[name] = recipe; return recipe end,
     CallOriginalRecipe = function(original, param) return {kind = "original", recipe = original, param = param} end,
@@ -67,7 +68,10 @@ local react = {
         hookIndex = hookIndex + 1
         if not hooks[hookIndex] then
             local value = initial
-            hooks[hookIndex] = {old = function() return value end, set = function(_, v) value = v end}
+            -- Like the game, reading expired state is an error.
+            hooks[hookIndex] = {old = function() assert(not expired, "old() on expired state"); return value end,
+                set = function(_, v) value = v end,
+                hasExpired = function() return expired end}
         end
         return hooks[hookIndex]
     end,
@@ -96,7 +100,9 @@ local langUtil = {format = function(message, values) return (message:gsub("{(.-)
 local nativePanel = {name = "native panel"}
 local tooltips = {LMAddWaypoint = {}, LMPromptWaypointModifier = {}, LMMoveWaypointTarget = {}}
 local warnings = {}
-local log = {warning = function(message) warnings[#warnings + 1] = message end}
+local messages = {}
+local log = {warning = function(message) warnings[#warnings + 1] = message end,
+    message = function(message) messages[#messages + 1] = message end}
 
 local function environment(reactApi, builtins, tips, panel, buttonApi)
     local env, cache = nil, {}
@@ -129,17 +135,20 @@ for _ in pairs(replacements) do count = count + 1 end
 assert(count == 4, "Only three tooltip recipes and the stop panel are replaced")
 assert(tools.EasierWaypointsPlacement, "Placement tool registered once at load")
 
--- Native placement tooltips keep native text, add direction and the modifier hint.
+assert(#messages == 1 and messages[1]:find("Easier Waypoints: runtime API", 1, true)
+    and messages[1]:find("calcPosition=yes", 1, true), "One runtime report per session")
+
+-- Native placement tooltips keep native text and add a lane highlight; a confirmed
+-- direction needs no text because the arrow shows it.
 local candidate = {edgePos = {edgeId = {entity = 1, index = 1}, param = 0.5}}
 local result = replacements[tooltips.LMAddWaypoint].fn(candidate)
-assert(result.kind == "layout" and #result.children == 3)
+assert(result.kind == "layout" and #result.children == 2)
 assert(result.children[1].recipe == tooltips.LMAddWaypoint and result.children[1].param == candidate)
-assert(result.children[2].text:find("direction of travel", 1, true))
-local overlay = result.children[3]
+local overlay = result.children[2]
 assert(overlay.kind == "overlay" and #overlay.edges == 4 and not overlay.ignoreDepth, "Lane plus one arrow")
 assert(overlay.edges[1].geometry == entities[1].network.edges[2].geometry, "Highlight the actual snapped lane")
 result = replacements[tooltips.LMPromptWaypointModifier].fn(candidate)
-assert(result.children[2].text:find("Hold the key shown above while clicking", 1, true),
+assert(#result.children == 3 and result.children[2].text:find("Hold the key shown above while clicking", 1, true),
     "Prompt says the native key must be held while clicking")
 for _, child in ipairs(result.children) do
     assert(not child.inlineHintSupport and not (child.text or ""):find("[iaHint", 1, true), "Plain text only, no key markup")
@@ -170,6 +179,16 @@ assert(not result.children[2].text:find("Clicking", 1, true), "The native prompt
 replacements[tooltips.LMMoveWaypointTarget].fn(candidate)
 assert(#warnings == 1 and warnings[1]:find("tooltip lane preview unavailable", 1, true), "Each failure condition is logged once")
 builtin.type.EdgeRenderable.Edge.new = constructor
+-- If straight arrow shapes can't be built, the lane fades towards the direction of travel.
+local geometryNew = api.type.EdgeGeometry.new
+api.type.EdgeGeometry.new = nil
+result = replacements[tooltips.LMAddWaypoint].fn(candidate)
+overlay = result.children[3]
+assert(#result.children == 3 and #overlay.edges == 1 and overlay.edges[1].colors[1].w < overlay.edges[1].colors[2].w
+    and result.children[2].text:find("brighter in the direction of travel", 1, true), "Arrow-less fallback still shows direction")
+replacements[tooltips.LMAddWaypoint].fn(candidate)
+assert(#warnings == 2 and warnings[2]:find("direction arrows unavailable", 1, true), "Logged once")
+api.type.EdgeGeometry.new = geometryNew
 
 -- Stop panel: one compact waypoint button; the stretch native addWaypoint will edit is in its tooltip.
 local added, pushed, popped = {}, 0, 0
@@ -298,7 +317,7 @@ descriptor, selector, tooltip = render()
 assert(tooltip.param.stretch == "Between Station 20 and Station 10", "The hovered leg, not the selected stretch")
 local routeSnap = find(descriptor.children, "lineViewer").snapPreview.snap
 assert(find(descriptor.children, "overlay") and routeSnap.edgeId.entity == 1 and routeSnap.edgeId.index == 1
-    and routeSnap.param == 0.5, "Nearest usable lane under the cursor is previewed")
+    and math.abs(routeSnap.param - 0.5) < 0.001, "Nearest usable lane under the cursor is previewed")
 -- The route pick does not change while crossing the road, so the lane follows the cursor each update.
 local queries = edgeQueries
 cursor = vec(1.9, 20, 0)
@@ -318,7 +337,7 @@ assert(selector.onSelect(77, {}, returnLeg) == true)
 inputActions.IA_SELECT.fn()
 local routed = line.path[7] and line.path[7].waypoint and line.path[7].waypoint.edgePos
 assert(#added == 4 and added[4].insertAt == 6 and #line.path == 7 and line.path[6].stop and routed
-    and routed.edgeId.entity == 1 and routed.edgeId.index == 1 and routed.param == 0.5,
+    and routed.edgeId.entity == 1 and routed.edgeId.index == 1 and math.abs(routed.param - 0.5) < 0.001,
     "A route click inserts into that leg, once, on the previewed lane")
 cursor = vec(500, 20, 0)
 selector.onHover(77, {}, {line = {entity = 77, stopNumber = 1}})
@@ -342,7 +361,7 @@ descriptor, selector, tooltip = render()
 assert(not find(descriptor.children, "overlay") and tooltip.param.detail:find("Preview unavailable", 1, true)
     and not tooltip.param.detail:find("arrow", 1, true), "Never describe an arrow nobody can see")
 assert(tooltip.param.detail:find("still uses the lane", 1, true) and inputActions.IA_SELECT.enabled(), "Placement stays available")
-assert(#warnings == 2 and warnings[2]:find("placement lane preview unavailable", 1, true), "Logged once per failure condition")
+assert(#warnings == 3 and warnings[3]:find("placement lane preview unavailable", 1, true), "Logged once per failure condition")
 builtin.type.EdgeRenderable.Edge.new = constructor
 
 local trackSnap = {edgeId = {entity = 2, index = 0}, param = 0.5}
@@ -381,6 +400,29 @@ descriptor, selector, tooltip = render()
 assert(tooltip.param.problem:find("no longer being edited", 1, true) and not find(descriptor.children, "overlay"))
 mode = finalMode
 
+-- Engine callbacks never raise: an error is contained and logged once per cause.
+local getModeState = common.getModeState
+common.getModeState = function() error("engine data changed") end
+local warningsBefore = #warnings
+selector.onHover(1, {}, {})
+selector.onHover(1, {}, {})
+common.getModeState = getModeState
+assert(#warnings == warningsBefore + 1 and warnings[#warnings]:find("placement hover failed", 1, true),
+    "A failing hover is contained and logged once")
+line.carriers = {road = true}
+cursor = vec(1.5, 20, 0)
+local nearestLane = env.ug_require("easier_waypoints::/plugins/easier_waypoints/direction.lua").nearestLane
+selector.onHover(77, {}, {line = {entity = 77, stopNumber = 1}})
+descriptor, selector, tooltip = render()
+env.ug_require("easier_waypoints::/plugins/easier_waypoints/direction.lua").nearestLane = function() error("no lane data") end
+cursor = vec(-1.5, 20, 0)
+stepFn()
+stepFn()
+env.ug_require("easier_waypoints::/plugins/easier_waypoints/direction.lua").nearestLane = nearestLane
+assert(warnings[#warnings]:find("placement cursor follow failed", 1, true)
+    and not warnings[#warnings - 1]:find("cursor follow", 1, true), "A failing update is contained and logged once")
+mode = finalMode
+
 -- Finishing: a right drag belongs to the camera, a right click closes the tool once.
 assert(inputActions.IA_CLOSE_TOPMOST_WINDOW and inputActions.IA_MENU_BACK, "Escape is captured before native back handlers")
 local mouse = selector.onProcessMouseEvent
@@ -395,6 +437,14 @@ inputActions.IA_MENU_BACK.fn()
 descriptor.onBack()
 assert(popped == 1 and #stack == 1, "Closing happens exactly once")
 assert(not manager.shelved and mode == finalMode and #line.path == 8, "The Line Manager returns with its state intact")
+-- After closing, late engine callbacks find expired state and do nothing.
+expired = true
+local warningsAtClose = #warnings
+assert(selector.onHover(1, {}, {transportNetworkEdge = {snap = snaps[1]}}) == nil)
+assert(selector.onSelect(1, {}, {transportNetworkEdge = {snap = snaps[1]}}) == false)
+stepFn()
+assert(#added == 5 and popped == 1 and #warnings == warningsAtClose, "Nothing happens, or is logged, after the tool has closed")
+expired = false
 
 -- The stylesheet only styles this mod's panel row, never native widgets elsewhere.
 local selectors = {}

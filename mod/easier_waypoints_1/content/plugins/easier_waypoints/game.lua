@@ -13,7 +13,16 @@ local CARRIER_MODES = {
 }
 local LINE_CARRIERS = {"ROAD", "TRAM", "RAIL", "WATER", "AIR"}
 local TOOLTIP_CLASS = "lvm-selector-tooltip, font-scale-tooltip, default-tooltip-configuration"
+local TANGENT_STEP = 0.01
+local LOCATE_STEPS = 12
+local LOCATE_REFINE = 10
+local LOCATE_TOLERANCE = 25
 local warned = {}
+
+-- The only lane-geometry function the game itself relies on.
+local function positionAt(geometry, param)
+    return api.engine.util.transport.calcPosition(geometry, param)
+end
 
 -- Hover re-renders constantly, so each failure condition is logged only once.
 function M.warnOnce(condition, detail)
@@ -22,6 +31,22 @@ function M.warnOnce(condition, detail)
     warned[key] = true
     if type(log) == "table" and log.warning then
         log.warning("Easier Waypoints: " .. condition .. ": " .. tostring(detail))
+    end
+end
+
+-- One log line per session saying which optional engine functions this game build has.
+function M.reportRuntime()
+    local function has(value) return value ~= nil and "yes" or "no" end
+    local ok, summary = pcall(function()
+        local geometry = api.type.EdgeGeometry or {}
+        return "EdgeGeometry.new=" .. has(geometry.new) .. " EdgeGeometry.Straight=" .. has(geometry.Straight)
+            .. " EdgeGeometry.Type=" .. has(geometry.Type) .. " EdgeId.new=" .. has(api.type.EdgeId and api.type.EdgeId.new)
+            .. " EdgePos.new=" .. has(api.type.EdgePos and api.type.EdgePos.new)
+            .. " EdgeRenderable=" .. has(builtin.EdgeRenderable and builtin.type.EdgeRenderable)
+            .. " calcPosition=" .. has(api.engine.util.transport.calcPosition)
+    end)
+    if type(log) == "table" and log.message then
+        log.message("Easier Waypoints: runtime API " .. (ok and summary or ("check failed: " .. tostring(summary))))
     end
 end
 
@@ -67,14 +92,31 @@ M.backend = {
         return {edges = network.edges, kind = kind, laneConfigs = configs}
     end,
     laneCarriers = M.laneCarriers,
+    -- Position and travel tangent; the tangent comes from two nearby samples.
     sample = function(geometry, param)
-        return api.type.EdgeGeometry.calcPos(geometry, param)
+        local a, b = math.max(0, param - TANGENT_STEP), math.min(1, param + TANGENT_STEP)
+        local pa, pb = positionAt(geometry, a), positionAt(geometry, b)
+        return {positionAt(geometry, param), {x = pb.x - pa.x, y = pb.y - pa.y, z = pb.z - pa.z}}
     end,
-    -- Nearest point on another lane of the same road, if one runs alongside.
+    -- Nearest point on a lane on the ground plane: a coarse scan, then refinement.
     locate = function(geometry, position)
-        local result = api.type.EdgeGeometry.locate(geometry, api.type.Vec3f.new(position.x, position.y, position.z), 16, 25)
-        if not result or not result[2] or type(result[1]) ~= "number" then return nil end
-        return math.min(1, math.max(0, result[1]))
+        local function distance(param)
+            local p = positionAt(geometry, param)
+            return (p.x - position.x) ^ 2 + (p.y - position.y) ^ 2
+        end
+        local best, bestDistance = 0, math.huge
+        for i = 0, LOCATE_STEPS do
+            local d = distance(i / LOCATE_STEPS)
+            if d < bestDistance then best, bestDistance = i / LOCATE_STEPS, d end
+        end
+        local low, high = math.max(0, best - 1 / LOCATE_STEPS), math.min(1, best + 1 / LOCATE_STEPS)
+        for _ = 1, LOCATE_REFINE do
+            local a, b = low + (high - low) / 3, high - (high - low) / 3
+            if distance(a) < distance(b) then high = b else low = a end
+        end
+        best = (low + high) / 2
+        if distance(best) > LOCATE_TOLERANCE ^ 2 then return nil end
+        return best
     end,
     -- Ground point under the cursor; on bridges this lies below the deck.
     cursorPosition = function()
@@ -116,13 +158,38 @@ local function laneColor(valid)
 end
 
 -- Depth testing stays enabled, so overlays do not paint through bridges.
+-- Returns the node and whether the arrows could be built. Without arrows a
+-- confirmed lane fades from dim to bright in the direction of travel instead.
 function M.laneOverlay(preview, valid)
-    local white = api.type.Vec4f.new(1, 1, 1, 1)
-    local edges = {renderable(preview.geometry, 1.2, laneColor(valid))}
-    for _, segment in ipairs(direction.arrowSegments(preview)) do
-        edges[#edges + 1] = renderable(straightGeometry(segment[1], segment[2]), 0.3, white)
+    local color = laneColor(valid)
+    local highlight = renderable(preview.geometry, 1.2, color)
+    local arrowsBuilt, arrows = pcall(function()
+        local white = api.type.Vec4f.new(1, 1, 1, 1)
+        local result = {}
+        for _, segment in ipairs(direction.arrowSegments(preview)) do
+            result[#result + 1] = renderable(straightGeometry(segment[1], segment[2]), 0.3, white)
+        end
+        return result
+    end)
+    local edges = {highlight}
+    if arrowsBuilt then
+        for _, edge in ipairs(arrows) do edges[#edges + 1] = edge end
+    else
+        M.warnOnce("direction arrows unavailable", arrows)
+        if preview.direction == "forward" then
+            highlight.colors = {api.type.Vec4f.new(color.x, color.y, color.z, 0.15), color}
+        end
     end
-    return builtin.EdgeRenderable {edges = edges, ignoreDepth = false}
+    return builtin.EdgeRenderable {edges = edges, ignoreDepth = false}, arrowsBuilt
+end
+
+-- Tooltip detail for a drawn lane, or nil when the arrow speaks for itself.
+function M.laneDetail(preview, arrowsBuilt)
+    if preview.direction == "forward" then
+        if arrowsBuilt then return nil end
+        return _("The highlight gets brighter in the direction of travel.")
+    end
+    return M.directionText(preview)
 end
 
 function M.pointOverlay(position, valid)

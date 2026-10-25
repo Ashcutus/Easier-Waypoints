@@ -40,6 +40,13 @@ class LuaCompatibilityTests(unittest.TestCase):
         self.assertEqual(problems("local a = unpack(t)"), ["Lua 5.1 global"])
         self.assertEqual(problems("local a = table.unpack(t)"), [])
 
+    def test_runtime_avoids_functions_missing_in_game(self):
+        # Declared in the API definitions but nil in the running game.
+        missing = re.compile(r"\bEdgeGeometry\.(?:calcPos|locate)\b")
+        for path in sorted(RUNTIME.rglob("*.lua")):
+            with self.subTest(path=path.relative_to(ROOT).as_posix()):
+                self.assertIsNone(missing.search(code_only(path.read_text(encoding="utf-8"))))
+
     def test_runtime_lua_is_lua52_compatible(self):
         files = sorted(RUNTIME.rglob("*.lua"))
         self.assertTrue(files)
