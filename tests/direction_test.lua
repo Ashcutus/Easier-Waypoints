@@ -1,29 +1,77 @@
 local model = dofile("mod/easier_waypoints_1/content/plugins/easier_waypoints/direction.lua")
 local checks = 0
 local function check(condition, message) checks = checks + 1; assert(condition, message) end
-local geometry = {}
-local edge = {geometry = geometry, transportModes = {bus = true}, forwardOnly = true}
+
+-- Lanes run along y at x = offset; dy is the geometry direction (+1 or -1).
+local function lane(offset, dy, modes, forwardOnly)
+    return {geometry = {x = offset, dy = dy}, transportModes = modes, forwardOnly = forwardOnly}
+end
+local car, walk, train = {car = true}, {person = true}, {train = true}
 local seenEntity, seenParam
+local info
 local backend = {
-    roadNetwork = function(entity) seenEntity = entity; return {edges = {edge}} end,
-    isRoadMode = function(modes) return modes.bus end,
-    sample = function(shape, param)
-        assert(shape == geometry); seenParam = param
-        return {{x = 100, y = 200, z = 12}, {x = 0, y = 2, z = 1}}
+    edgeInfo = function(entity) seenEntity = entity; return info end,
+    laneCarriers = function(modes)
+        if modes.car then return {ROAD = true} end
+        if modes.train then return {RAIL = true} end
+        return {}
     end,
+    sample = function(geometry, param)
+        seenParam = param
+        return {{x = geometry.x, y = 200, z = 12}, {x = 0, y = 2 * geometry.dy, z = geometry.dy}}
+    end,
+    locate = function(geometry, position) return math.abs(geometry.x - position.x) < 25 and 0.5 or nil end,
 }
-local waypoint = {edgePos = {edgeId = {entity = 42, index = 0}, param = 0.75}}
+local function street(edges, configs) return {kind = "street", edges = edges, laneConfigs = configs} end
+local twoWay = {{forward = false, carriers = {ROAD = true}}, {forward = true, carriers = {ROAD = true}},
+    {forward = true, carriers = {}}}
+local oneWay = {{forward = true, carriers = {ROAD = true}}, {forward = true, carriers = {ROAD = true}}}
+
+info = street({lane(-2, -1, car, true), lane(2, 1, car, true), lane(6, 1, walk, false)}, twoWay)
+local waypoint = {edgePos = {edgeId = {entity = 42, index = 1}, param = 0.75}}
 local preview = assert(model.preview(waypoint, backend))
-check(seenEntity == 42 and seenParam == 0.75, "Use the actual snap, including zero-based edge zero")
+check(seenEntity == 42 and seenParam ~= nil, "Use the actual snap, including zero-based edge indices")
+check(preview.direction == "forward", "Two-way street with opposing lanes confirms the direction")
 check(preview.position.z == 12 and preview.tangent.y == 1, "Preserve elevation and normalize XY tangent")
-check(waypoint.edgePos.edgeId.index == 0, "Do not mutate candidate data")
+check(preview.carriers.ROAD and preview.kind == "street", "Report lane carriers and edge kind")
+check(waypoint.edgePos.edgeId.index == 1, "Do not mutate candidate data")
 local arrows = model.arrowSegments(preview)
-check(#arrows == 3, "One-way edge gets one arrow")
+check(#arrows == 3, "Confirmed direction gets one arrow")
 check(arrows[1][2].y > arrows[1][1].y, "Arrow follows lane geometry, not screen axes")
 check(arrows[1][2].z > arrows[1][1].z, "Arrow follows slope on a raised road")
-edge.forwardOnly = false
-preview = assert(model.preview(waypoint, backend)); arrows = model.arrowSegments(preview)
-check(#arrows == 6 and arrows[4][2].y < arrows[4][1].y, "Bidirectional edges get opposing arrows")
+waypoint.edgePos.edgeId.index = 0
+preview = assert(model.preview(waypoint, backend))
+check(preview.direction == "forward" and model.arrowSegments(preview)[1][2].y < model.arrowSegments(preview)[1][1].y,
+    "The other side of a two-way road points the other way")
+
+info = street({lane(-2, 1, car, true), lane(2, 1, car, true)}, twoWay)
+check(assert(model.preview(waypoint, backend)).direction == "unconfirmed",
+    "Two-way config but same-direction lanes: never claim a direction")
+check(#model.arrowSegments(model.preview(waypoint, backend)) == 0, "Unconfirmed direction gets no arrow")
+info = street({lane(-2, 1, car, true), lane(2, 1, car, true)}, oneWay)
+check(model.preview(waypoint, backend).direction == "forward", "One-way street lanes all agree")
+info = street({lane(-2, 1, car, true), lane(2, -1, car, true)}, oneWay)
+check(model.preview(waypoint, backend).direction == "unconfirmed", "One-way config with an opposing lane is inconsistent")
+info = street({lane(-2, 1, car, nil), lane(2, -1, car, true)}, twoWay)
+check(model.preview(waypoint, backend).direction == "unconfirmed", "Missing direction is unknown, not bidirectional")
+info = street({lane(-2, 1, car, true), lane(2, -1, car, false)}, twoWay)
+check(model.preview(waypoint, backend).direction == "unconfirmed", "A two-way vehicle lane on a street is unexpected")
+info = street({lane(-2, 1, car, true), lane(80, -1, car, true)}, twoWay)
+check(model.preview(waypoint, backend).direction == "unconfirmed", "Distant lanes are not evidence")
+info = street({lane(-2, 1, car, true), lane(2, -1, car, true)}, {})
+check(model.preview(waypoint, backend).direction == "unconfirmed", "No lane config, no claim")
+
+info = {kind = "track", edges = {lane(0, 1, train, false)}}
+preview = assert(model.preview(waypoint, backend))
+check(preview.direction == "both" and preview.carriers.RAIL, "Tracks are usable in either direction")
+check(#model.arrowSegments(preview) == 6 and model.arrowSegments(preview)[4][2].y < model.arrowSegments(preview)[4][1].y,
+    "Bidirectional lanes get opposing arrows")
+info.edges[1].forwardOnly = true
+check(model.preview(waypoint, backend).direction == "unconfirmed", "A one-way track cannot be cross-checked")
+
+info = street({lane(6, 1, walk, false)}, twoWay)
+check(model.preview(waypoint, backend) == nil, "Footpaths are not vehicle lanes")
+info = street({lane(-2, 1, car, true)}, oneWay)
 for _, value in ipairs({-1, 0.5, 1, math.huge, 0/0}) do
     waypoint.edgePos.edgeId.index = value
     check(model.preview(waypoint, backend) == nil, "Invalid/missing edge index must not select another lane")
@@ -34,22 +82,34 @@ for _, value in ipairs({-0.1, 1.1, math.huge, 0/0}) do
     check(model.preview(waypoint, backend) == nil, "Reject invalid snap parameter")
 end
 waypoint.edgePos.param = 0.5
-edge.forwardOnly = nil
-check(model.preview(waypoint, backend) == nil, "Missing direction is unknown, not bidirectional")
-edge.forwardOnly = true; edge.transportModes.bus = false
-check(model.preview(waypoint, backend) == nil, "Non-road modes retain native behavior")
-edge.transportModes.bus = true
-backend.roadNetwork = function() return nil end
+info = nil
 check(model.preview(waypoint, backend) == nil, "Deleted edge retains native behavior")
 check(model.preview({pos = {x = 1, y = 2, z = 3}}, backend) == nil, "Ship/aircraft waypoint is not a lane")
+
+local marker = model.markerSegments({x = 1, y = 2, z = 3})
+check(#marker == 3 and marker[3][2].z == 9, "Point waypoints get a cross and a post")
+check(#model.markerSegments({x = 0/0, y = 0, z = 0}) == 0, "Invalid points draw nothing")
+check(model.compatible({ROAD = true}, {ROAD = true, TRAM = true}), "Shared tram/road lanes suit road lines")
+check(not model.compatible({ROAD = true}, {RAIL = true}), "Road lines cannot use tracks")
+
 local path = {{stop = {stationGroup = 11}}, {waypoint = {}}, {waypoint = {}}, {stop = {stationGroup = 22}}, {waypoint = {}}}
 local before, after = model.segment(path, 2)
 check(before == 1 and after == 4, "Find surrounding stops across multiple waypoints")
-before, after = model.segment(path, nil)
-check(before == 4 and after == 1, "Append refers to the wraparound stretch")
+before, after = model.segment(path, 5)
+check(before == 4 and after == 1, "After the last entry refers to the wraparound stretch")
 before, after = model.segment(path, 0)
 check(before == 4 and after == 1, "Insertion before first entry wraps correctly")
-check(model.segment(path, -1) == nil, "No selected segment is not append")
+check(model.segment(path, -1) == nil and model.segment(path, nil) == nil, "No selected segment is not a stretch")
 check(model.segment({{stop = {}}}, 1) == nil, "Do not invent a stretch on an incomplete line")
-check(model.segment({}, nil) == nil, "Empty line is safe")
-print("PASS: " .. checks .. " direction, stale-data, slope and cyclic segment checks")
+check(model.segment({}, 0) == nil, "Empty line is safe")
+
+-- Native addWaypoint with no selected stretch inserts before the last entry.
+local short = {{stop = {stationGroup = 1}}, {waypoint = {}}, {stop = {stationGroup = 2}}}
+check(model.waypointAfterIndex(short, nil) == 2, "No stretch selected: insert before the last entry")
+before, after = model.segment(short, model.waypointAfterIndex(short, nil))
+check(before == 1 and after == 3, "Label the stretch native addWaypoint really edits (S1 -> S2, not S2 -> S1)")
+check(model.waypointAfterIndex(short, 3) == 3 and model.waypointAfterIndex(short, 0) == 0, "Selected stretch is kept")
+check(model.waypointAfterIndex(short, -1) == nil and model.waypointAfterIndex(short, 4) == nil, "Reject -1 and out of range")
+check(model.waypointAfterIndex({}, nil) == 0, "Empty path stays safe")
+check(model.stopOrdinal(path, 4) == 2 and model.stopOrdinal(path, 3) == 1, "Stop numbers skip waypoints")
+print("PASS: " .. checks .. " direction cross-check, stale-data, slope, marker and stretch checks")
