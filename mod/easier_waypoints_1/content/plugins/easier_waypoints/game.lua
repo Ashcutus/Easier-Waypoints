@@ -76,6 +76,15 @@ M.backend = {
         if not result or not result[2] or type(result[1]) ~= "number" then return nil end
         return math.min(1, math.max(0, result[1]))
     end,
+    -- Ground point under the cursor; on bridges this lies below the deck.
+    cursorPosition = function()
+        if not api.gui.mouse.hasTerrainPosition() then return nil end
+        return api.gui.mouse.getTerrainPosition()
+    end,
+    networksNear = function(position, radius)
+        return api.engine.util.octree.findEntitiesInCircle(api.type.Vec2f.new(position.x, position.y), radius,
+            api.type.ComponentType.TRANSPORT_NETWORK) or {}
+    end,
 }
 
 local function straightGeometry(a, b)
@@ -150,9 +159,10 @@ function M.previewUnavailableText(point, clickStillWorks)
     return _("Preview unavailable: the lane highlight couldn't be drawn.")
 end
 
--- Display names are plain text: only fixed strings may use inline key hints.
-function M.tooltipText(text, hints)
-    return builtin.TextView {meta = {class = TOOLTIP_CLASS}, text = text, inlineHintSupport = hints == true}
+-- Plain text only: inline key hints did not render in the stop panel, and
+-- display names must never be parsed as markup.
+function M.tooltipText(text)
+    return builtin.TextView {meta = {class = TOOLTIP_CLASS}, text = text}
 end
 
 function M.stopName(path, index)

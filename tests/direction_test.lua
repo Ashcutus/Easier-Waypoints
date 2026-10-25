@@ -86,6 +86,22 @@ info = nil
 check(model.preview(waypoint, backend) == nil, "Deleted edge retains native behavior")
 check(model.preview({pos = {x = 1, y = 2, z = 3}}, backend) == nil, "Ship/aircraft waypoint is not a lane")
 
+-- Route clicks: nearest lane the line can use, on the ground plane, within a limit.
+local networks = {
+    [7] = street({lane(-2, -1, car, true), lane(2, 1, car, true), lane(6, 1, walk, false)}, twoWay),
+    [8] = {kind = "track", edges = {lane(3, 1, train, false)}},
+}
+backend.edgeInfo = function(entity) return networks[entity] end
+local nearest = model.nearestLane({x = 1.5, y = 200, z = 40}, {7, 8}, backend, {ROAD = true}, 8)
+check(nearest and nearest.entity == 7 and nearest.index == 1 and nearest.param == 0.5,
+    "Nearest road lane wins, by ground distance even below a bridge")
+nearest = model.nearestLane({x = 3, y = 200, z = 0}, {7, 8}, backend, {RAIL = true}, 8)
+check(nearest and nearest.entity == 8 and nearest.index == 0, "Rail lines only consider tracks")
+check(model.nearestLane({x = 5.5, y = 200, z = 0}, {7}, backend, {ROAD = true}, 3) == nil, "Footpaths are never chosen")
+check(model.nearestLane({x = 1.5, y = 200, z = 0}, {7}, backend, {ROAD = true}, 0.25) == nil, "Too far from any lane")
+check(model.nearestLane({x = 0/0, y = 0, z = 0}, {7}, backend, {ROAD = true}, 8) == nil, "Invalid cursor position")
+check(model.nearestLane({x = 1.5, y = 200, z = 0}, {}, backend, {ROAD = true}, 8) == nil, "No networks nearby")
+
 local marker = model.markerSegments({x = 1, y = 2, z = 3})
 check(#marker == 3 and marker[3][2].z == 9, "Point waypoints get a cross and a post")
 check(#model.markerSegments({x = 0/0, y = 0, z = 0}) == 0, "Invalid points draw nothing")

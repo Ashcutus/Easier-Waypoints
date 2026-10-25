@@ -17,6 +17,7 @@ local entities = {
     [10] = {name = "Station 10"}, [20] = {name = "Station 20"},
 }
 local exists = true
+local cursor -- ground point under the mouse, or nil
 local api = {
     type = {ComponentType = {BASE_EDGE = "base", BASE_EDGE_STREET = "street", BASE_NODE = "node",
             TRANSPORT_NETWORK = "network", TOWN_BUILDING = "town", TRANSPORT_VEHICLE = "vehicle", WORLD = "world", LINE = "line"},
@@ -28,14 +29,26 @@ local api = {
             calcPos = function(g) return {{x = g.x, y = 20, z = 3}, {x = 0, y = 2 * g.dy, z = 0}} end,
             locate = function(g, p) return {0.5, math.abs(g.x - p.x) < 25} end},
         Waypoint = {new = function() return {tag = -1} end},
+        EdgeId = {new = function(entity, index) return {entity = entity, index = index} end},
+        EdgePos = {new = function() return {} end},
         StationTerminal = {new = function(s, t) return {station = s, terminal = t} end}},
     engine = {entityExists = function(entity) return exists and entities[entity] ~= nil end,
         getComponent = function(entity, component)
             local e = entities[entity] or {}
             return ({network = e.network, base = e.base, street = e.street, world = e.world})[component]
         end,
-        util = {getEntityName = function(entity) return entities[entity] and entities[entity].name end}},
+        util = {getEntityName = function(entity) return entities[entity] and entities[entity].name end,
+            octree = {findEntitiesInCircle = function(center, radius, component)
+                assert(component == "network" and radius > 0)
+                local found = {}
+                for entity, e in pairs(entities) do
+                    if e.network and math.abs(e.network.edges[1].geometry.x - center.x) < radius then found[#found + 1] = entity end
+                end
+                table.sort(found)
+                return found
+            end}}},
     gui = {SelectionDetails = {TransportNetworkEdge = {new = function() return {} end}},
+        mouse = {hasTerrainPosition = function() return cursor ~= nil end, getTerrainPosition = function() return cursor end},
         genericRep = {find = function() return 1 end, get = function() return {data = {AddWaypoint = {"add.wav"}}} end},
         sound = {playRandomSoundEffect = function() end}},
     cmd = setmetatable({}, {__index = function() error("UI code must never issue commands directly") end}),
@@ -58,7 +71,7 @@ local react = {
     useInputAction = function(key, handler) inputActions[key] = handler end,
     iaHandler = function(fn, enabled, text) return {fn = fn, enabled = enabled, text = text} end,
 }
-local builtin = {BoxLayout = node("layout"), TextView = node("text"), EdgeRenderable = node("overlay"),
+local builtin = {BoxLayout = node("layout"), TextView = node("text"), EdgeRenderable = node("overlay"), Component = node("component"),
     Selector = node("selector"), LineViewer = node("lineViewer"), ActionDescriptor = node("action"),
     ActionTooltip = node("tooltip"),
     type = {Orientation = {Vertical = 1}, EdgeRenderable = {Edge = {new = function(geometry) return {geometry = geometry} end}},
@@ -71,8 +84,9 @@ local lineUtil = {
     convertDetails = function(_, details) return details end,
     computeStopAndWaypointIndex0 = function(_, stopNumber) return {0, stopNumber} end,
 }
-local buttons = {makeTextButton = function(class, text, onClick, tooltip, disabled)
-    return {kind = "button", class = class, text = text, onClick = onClick, tooltip = tooltip, disabled = disabled}
+local buttons = {makeIconTextButton = function(class, icon, text, onClick, tooltip, enabled, tag, textClass)
+    return {kind = "button", class = class, icon = icon, text = text, onClick = onClick, tooltip = tooltip,
+        enabled = enabled, tag = tag, textClass = textClass}
 end}
 local langUtil = {format = function(message, values) return (message:gsub("{(.-)}", function(k) return tostring(values[k]) end)) end}
 local nativePanel = {name = "native panel"}
@@ -121,11 +135,13 @@ local overlay = result.children[3]
 assert(overlay.kind == "overlay" and #overlay.edges == 4 and not overlay.ignoreDepth, "Lane plus one arrow")
 assert(overlay.edges[1].geometry == entities[1].network.edges[2].geometry, "Highlight the actual snapped lane")
 result = replacements[tooltips.LMPromptWaypointModifier].fn(candidate)
-assert(result.children[2].text:find("[iaHint=IA_PRECISION_MODE/]", 1, true) and result.children[2].inlineHintSupport,
-    "Prompt says the modifier must be held while clicking")
-assert(not result.children[3].inlineHintSupport, "Direction text is plain text")
+assert(result.children[2].text:find("Hold the key shown above while clicking", 1, true),
+    "Prompt says the native key must be held while clicking")
+for _, child in ipairs(result.children) do
+    assert(not child.inlineHintSupport and not (child.text or ""):find("[iaHint", 1, true), "Plain text only, no key markup")
+end
 result = replacements[tooltips.LMPromptWaypointModifier].fn({pos = vec(1, 2, 3)})
-assert(#result.children == 2 and result.children[2].text:find("IA_PRECISION_MODE", 1, true),
+assert(#result.children == 2 and result.children[2].text:find("Hold the key shown above", 1, true),
     "Ship/aircraft prompt also explains the modifier")
 entities[1].network.edges[1].geometry.dy = 1
 result = replacements[tooltips.LMMoveWaypointTarget].fn(candidate)
@@ -151,7 +167,7 @@ replacements[tooltips.LMMoveWaypointTarget].fn(candidate)
 assert(#warnings == 1 and warnings[1]:find("tooltip lane preview unavailable", 1, true), "Each failure condition is logged once")
 builtin.type.EdgeRenderable.Edge.new = constructor
 
--- Stop panel: mode-aware text, the stretch native addWaypoint will edit, and the tool button.
+-- Stop panel: one compact waypoint button; the stretch native addWaypoint will edit is in its tooltip.
 local added, pushed, popped = {}, 0, 0
 local actionFn
 local line = {entityAndRevision = {entity = 77}, carriers = {road = true},
@@ -200,29 +216,34 @@ local common = {
         toolStack = {get = function() return {getApi = function() return stackApi end} end}},
 }
 local params = {commonParams = common}
+local normalPath = line.path
+local function waypointButton(panel)
+    local row = panel.children[1]
+    assert(row.kind == "component" and row.meta.class == "ew-waypoint-row", "One compact row above the stop list")
+    return row.layout.children[1]
+end
 result = replacements[nativePanel].fn(params)
-assert(result.children[1].text == "New waypoints go between Station 10 and Station 20.")
-assert(result.children[1].meta.class == "font-scale-body" and not result.children[1].inlineHintSupport, "Names are plain text")
-assert(result.children[2].inlineHintSupport and result.children[2].text:find("IA_PRECISION_MODE", 1, true))
-assert(result.children[3].kind == "button" and result.children[3].text == "Place Waypoint")
-assert(result.children[4].recipe == nativePanel and result.children[4].param == params)
+assert(#result.children == 2 and result.children[2].recipe == nativePanel and result.children[2].param == params)
+local button = waypointButton(result)
+assert(button.text == "Add Waypoint" and button.class:find("ew-add-waypoint", 1, true) and button.class:find("secondary", 1, true))
+assert(button.icon:find("category_waypoints", 1, true) and button.textClass == "font-scale-annotation", "Small native waypoint button")
+assert(button.enabled and button.tooltip:find("between Station 10 and Station 20", 1, true), "The stretch lives in the tooltip")
+for _, child in ipairs(result.children) do assert(child.kind ~= "text", "No permanent text block in the panel") end
 mode = {"SEGMENT", nil}
 line.path = {{stop = {stationGroup = 20}}, {waypoint = {}}, {stop = {stationGroup = 10}}}
-result = replacements[nativePanel].fn(params)
-assert(result.children[1].text == "New waypoints go between Station 20 and Station 10.",
-    "No stretch selected: label where native addWaypoint inserts (before the last entry)")
-line.path = {{stop = {stationGroup = 10}}, {waypoint = {}}, {stop = {stationGroup = 20}}}
+assert(waypointButton(replacements[nativePanel].fn(params)).tooltip:find("between Station 20 and Station 10", 1, true),
+    "No stretch selected: name where native addWaypoint inserts (before the last entry)")
+line.path = normalPath
 mode = {"SEGMENT", -1}
-result = replacements[nativePanel].fn(params)
-assert(#result.children == 2 and result.children[1].text:find("Select a stretch", 1, true), "No button without a stretch")
+button = waypointButton(replacements[nativePanel].fn(params))
+assert(button.enabled == false and button.tooltip:find("Select a stretch", 1, true), "Visible but disabled without a stretch")
 mode = {"MOVE_WAYPOINT", {}}
-result = replacements[nativePanel].fn(params)
-assert(#result.children == 2 and result.children[1].text:find("new location", 1, true), "Move mode explains the move")
+assert(#replacements[nativePanel].fn(params).children == 1, "Moving a waypoint: native panel only")
 mode = {"MOVE_STOP", {}}
 assert(#replacements[nativePanel].fn(params).children == 1, "Other modes only show the native panel")
 line.carriers = {rail = true}
 mode = {"SEGMENT", 1}
-assert(#replacements[nativePanel].fn(params).children == 4, "Rail lines get the same guidance")
+assert(waypointButton(replacements[nativePanel].fn(params)).enabled, "Rail lines get the button too")
 line.carriers = {road = true}
 common.lineState = nil
 assert(#replacements[nativePanel].fn(params).children == 1, "No line state: native panel only")
@@ -236,12 +257,13 @@ local function render()
     return descriptor, find(descriptor.children, "selector"), find(descriptor.children, "tooltip")
 end
 mode = {"SEGMENT", nil} -- the Line Manager's state after a waypoint was moved
-result = replacements[nativePanel].fn(params)
-result.children[3].onClick()
+waypointButton(replacements[nativePanel].fn(params)).onClick()
 assert(pushed == 1 and actionFn and manager.shelved, "Button pushes the placement tool over the shelved Line Manager")
 local descriptor, selector, tooltip = render()
-assert(selector.lineViewerSupport and find(descriptor.children, "lineViewer").preferLineOverTransportNetworkEdge == false)
-assert(not find(descriptor.children, "overlay") and tooltip.param.stretch == "Adding waypoints between Station 10 and Station 20.")
+assert(selector.lineViewerSupport and find(descriptor.children, "lineViewer").preferLineOverTransportNetworkEdge == true,
+    "Lane lines pick the drawn route first, so it can be clicked")
+assert(not find(descriptor.children, "overlay") and tooltip.param.stretch == "Adds a waypoint between Station 10 and Station 20.")
+assert(tooltip.param.hint:find("route", 1, true) and tooltip.param.hint:find("Esc", 1, true), "Idle hint names both ways in and out")
 local snaps = {}
 for i, param in ipairs({0.2, 0.5, 0.8}) do
     snaps[i] = {edgeId = {entity = 1, index = 1}, param = param}
@@ -251,7 +273,7 @@ for i, param in ipairs({0.2, 0.5, 0.8}) do
     overlay = find(descriptor.children, "overlay")
     assert(overlay and #overlay.edges == 4, "Overlay is a direct ActionDescriptor child")
     assert(tooltip.param.detail:find("direction of travel", 1, true) and not tooltip.param.problem)
-    assert(tooltip.param.stretch == "Adding waypoints between Station 10 and Station 20.", "Every click stays in the stretch")
+    assert(tooltip.param.stretch == "Adds a waypoint between Station 10 and Station 20.", "Every click stays in the stretch")
     assert(find(descriptor.children, "lineViewer").snapPreview.snap == snaps[i])
     assert(selector.onSelect(1, {}, {transportNetworkEdge = {snap = snaps[i]}}) == true)
     inputActions.IA_SELECT.fn()
@@ -263,6 +285,36 @@ for i = 1, 3 do
     assert(line.path[2 + i].waypoint.edgePos == snaps[i], "Consecutive clicks keep their order along the line")
 end
 assert(added[1].insertAt == nil and added[2].insertAt == 3 and added[3].insertAt == 4, "Each click follows the last one")
+
+-- Clicking the drawn route adds the waypoint to that leg, on the nearest usable lane.
+assert(mode[2] == 5, "The selected stretch follows the last placement")
+cursor = vec(1.5, 20, 0)
+local returnLeg = {line = {entity = 77, stopNumber = 6}} -- Station 20 back to Station 10
+selector.onHover(77, {}, returnLeg)
+descriptor, selector, tooltip = render()
+assert(tooltip.param.stretch == "Adds a waypoint between Station 20 and Station 10.", "The hovered leg, not the selected stretch")
+local routeSnap = find(descriptor.children, "lineViewer").snapPreview.snap
+assert(find(descriptor.children, "overlay") and routeSnap.edgeId.entity == 1 and routeSnap.edgeId.index == 1
+    and routeSnap.param == 0.5, "Nearest usable lane under the cursor is previewed")
+assert(tooltip.param.detail:find("direction of travel", 1, true) and inputActions.IA_SELECT.enabled())
+assert(selector.onSelect(77, {}, returnLeg) == true)
+inputActions.IA_SELECT.fn()
+local routed = line.path[7] and line.path[7].waypoint and line.path[7].waypoint.edgePos
+assert(#added == 4 and added[4].insertAt == 6 and #line.path == 7 and line.path[6].stop and routed
+    and routed.edgeId.entity == 1 and routed.edgeId.index == 1 and routed.param == 0.5,
+    "A route click inserts into that leg, once, on the previewed lane")
+cursor = vec(500, 20, 0)
+selector.onHover(77, {}, {line = {entity = 77, stopNumber = 1}})
+descriptor, selector, tooltip = render()
+assert(tooltip.param.problem:find("No lane found", 1, true) and not inputActions.IA_SELECT.enabled(), "No lane nearby")
+cursor = nil
+selector.onHover(77, {}, {line = {entity = 77, stopNumber = 2}})
+descriptor, selector, tooltip = render()
+assert(tooltip.param.problem:find("No lane found", 1, true), "No ground position: refuse rather than guess")
+selector.onHover(99, {}, {line = {entity = 99, stopNumber = 1}})
+descriptor, selector, tooltip = render()
+assert(not tooltip.param.problem and not find(descriptor.children, "overlay"), "Other lines' routes are ignored")
+assert(#added == 4)
 
 -- A preview that cannot be drawn is reported once and described honestly.
 builtin.type.EdgeRenderable.Edge.new = function() error("unsupported renderer") end
@@ -280,16 +332,17 @@ local trackSnap = {edgeId = {entity = 2, index = 0}, param = 0.5}
 selector.onHover(2, {}, {transportNetworkEdge = {snap = trackSnap}})
 descriptor, selector, tooltip = render()
 assert(tooltip.param.problem:find("can't use", 1, true) and not inputActions.IA_SELECT.enabled(), "Road line rejects tracks")
-assert(selector.onSelect(2, {}, {transportNetworkEdge = {snap = trackSnap}}) == false and #added == 3)
+assert(selector.onSelect(2, {}, {transportNetworkEdge = {snap = trackSnap}}) == false and #added == 4)
 stopProtected = true
 selector.onHover(1, {}, {transportNetworkEdge = {snap = {edgeId = {entity = 1, index = 0}, param = 0.25}}})
 descriptor, selector, tooltip = render()
-assert(tooltip.param.problem:find("can't be edited", 1, true) and #added == 3, "Protected lines are explained, not edited")
+assert(tooltip.param.problem:find("can't be edited", 1, true) and #added == 4, "Protected lines are explained, not edited")
 stopProtected = false
 line.carriers = {water = true}
 selector.onHover(5, {}, {world = {pos = vec(9, 9, 0), water = false}})
 descriptor, selector, tooltip = render()
 assert(tooltip.param.problem == "Ship waypoints must be on water." and descriptor.terrainCirclePolicy == "Always")
+assert(find(descriptor.children, "lineViewer").preferLineOverTransportNetworkEdge == false, "Ships pick free points")
 selector.onHover(5, {}, {world = {pos = vec(0/0, 9, 0), water = true}})
 descriptor, selector, tooltip = render()
 assert(tooltip.param.problem:find("couldn't be read", 1, true) and not tooltip.param.detail:find("Clicking", 1, true),
@@ -298,22 +351,41 @@ selector.onHover(5, {}, {world = {pos = vec(9, 9, 0), water = true}})
 descriptor, selector = render()
 assert(#find(descriptor.children, "overlay").edges == 3, "Ship waypoint marker")
 selector.onSelect(5, {}, {world = {pos = vec(9, 9, 0), water = true}})
-assert(#added == 4 and line.path[6].waypoint.pos.x == 9 and line.path[6].waypoint.edgePos == nil and line.path[7].stop)
+assert(#added == 5 and #line.path == 8 and line.path[8].waypoint.pos.x == 9 and line.path[8].waypoint.edgePos == nil)
 local finalMode = mode
 line.carriers = {air = true}
 tooClose = true
 selector.onHover(5, {}, {world = {pos = vec(30, 9, 90), water = false}})
 descriptor, selector, tooltip = render()
-assert(tooltip.param.problem == "Too close to another waypoint." and #added == 4)
+assert(tooltip.param.problem == "Too close to another waypoint." and #added == 5)
 tooClose = false
 mode = {"MOVE_STOP", {}}
 descriptor, selector, tooltip = render()
-assert(tooltip.param.hint:find("no longer selected", 1, true) and not find(descriptor.children, "overlay"))
+assert(tooltip.param.hint:find("no longer being edited", 1, true) and not find(descriptor.children, "overlay"))
 mode = finalMode
 inputActions.IA_MENU_BACK.fn()
 descriptor.onBack()
 assert(popped == 1 and #stack == 1, "Back pops the tool exactly once")
-assert(not manager.shelved and mode == finalMode and #line.path == 7, "The Line Manager returns with its state intact")
+assert(not manager.shelved and mode == finalMode and #line.path == 8, "The Line Manager returns with its state intact")
+
+-- The stylesheet only styles this mod's panel row, never native widgets elsewhere.
+local selectors = {}
+local cssEnv = setmetatable({require = function(path)
+    assert(path == "::/gui/main/stylesheetutil.lua")
+    return {makeAdder = function(result) return function(selector, style)
+        result[#result + 1] = {selector, style}
+        selectors[#selectors + 1] = selector
+    end end}
+end}, {__index = _G})
+assert(loadfile(root .. "panel.css.lua", "t", cssEnv))()
+assert(#cssEnv.data() == #selectors and #selectors > 0)
+local styled = table.concat(selectors, "\n")
+for _, selector in ipairs(selectors) do
+    for part in selector:gmatch("[^,]+") do
+        assert(part:match("^%s*R::EasierWaypointsPanel "), "Scoped to the mod's panel: " .. part)
+    end
+end
+assert(styled:find("!ew-waypoint-row", 1, true) and styled:find("Button!ew-add-waypoint", 1, true), "Panel classes are styled")
 print("PASS: UI delegation, mode-aware guidance, placement tool, invalid-data fallback and no simulation commands")
 
 -- Optional: execute the actual shipped Lua recipe registry with opaque node IDs.
@@ -325,7 +397,8 @@ end
 -- The game's react.lua expects Lua 5.2; shim it when the suite runs on LuaJIT.
 table.unpack = table.unpack or unpack
 table.pack = table.pack or function(...) return {n = select("#", ...), ...} end
-local store = {builtin = {BoxLayout = 1, TextView = 2, EdgeRenderable = 3, WithComponentParams = 4, Button = 5},
+local store = {builtin = {BoxLayout = 1, TextView = 2, EdgeRenderable = 3, WithComponentParams = 4, Button = 5,
+        Component = 6, ImageView = 7},
     recipes = {}, recipeMetas = {}, originalRecipeFn = {}, recipeReplace = {}, tools = {}, recipeReplacementAllowed = true,
     extensionPoints = {}}
 local ids, nextId, nodes = {}, 100, {}
@@ -343,8 +416,9 @@ local host = setmetatable({_react = store, api = hostApi,
 local realReact = assert(loadfile(nativeReactPath, "t", host))()
 local realBuiltin = {type = builtin.type}
 for name in pairs(store.builtin) do realBuiltin[name] = realReact.DeclareBuiltin(name, function() end) end
-local realButtons = {makeTextButton = function(_, text, onClick)
-    return realBuiltin.Button {content = realBuiltin.TextView {text = text}, onClick = onClick}
+local realButtons = {makeIconTextButton = function(_, icon, text, onClick)
+    return realBuiltin.Button {content = realBuiltin.BoxLayout {children = {realBuiltin.ImageView {path = icon},
+        realBuiltin.TextView {text = text}}}, onClick = onClick}
 end}
 local function original(name) return realReact.RegisterRecipe(name, function() return realBuiltin.BoxLayout {children = {}} end) end
 local realTips = {LMAddWaypoint = original("NativeAdd"), LMPromptWaypointModifier = original("NativePrompt"), LMMoveWaypointTarget = original("NativeMove")}

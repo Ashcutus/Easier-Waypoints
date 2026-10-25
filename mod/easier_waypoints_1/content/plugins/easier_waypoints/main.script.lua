@@ -29,46 +29,39 @@ local function tooltipReplacement(name, original, instruction)
     return react.RegisterRecipe(name, function(waypoint)
         -- Always return a layout, including native fallback; recipe nodes are opaque.
         local children = {react.CallOriginalRecipe(original, waypoint)}
-        if instruction then children[#children + 1] = game.tooltipText(instruction(), true) end
+        if instruction then children[#children + 1] = game.tooltipText(instruction()) end
         for _, child in ipairs(laneChildren(waypoint)) do children[#children + 1] = child end
         return vertical(children)
     end)
 end
 
--- Plain data first; nodes are only created once every lookup has succeeded.
+local WAYPOINT_ICON = "::/gui/construction/menu/menu_categories/category_waypoints.tga"
+
+-- Only while a line is being edited; the stretch lives in the tooltip so the
+-- panel keeps a single compact row. Plain data first, nodes afterwards.
 local function panelState(common)
     local line = common.lineState and common.lineState:old()
     local mode = common.getModeState()
-    if not line or not line.path or not mode then return nil end
-    if mode[1] == "MOVE_WAYPOINT" then
-        return {hint = _("Click the new location for the waypoint, or press [iaHint=IA_MENU_BACK/] to cancel.")}
-    end
-    if mode[1] ~= "SEGMENT" then return nil end
-    local text = game.stretchText(line, mode[2], _("New waypoints go between {from} and {to}."))
-    if not text then return {hint = _("Select a stretch of the line to add waypoints to it.")} end
-    return {
-        text = text,
-        hint = _("To add a waypoint, hold [iaHint=IA_PRECISION_MODE/] and click in the world, or use Place Waypoint."),
-        place = true,
-    }
+    if not line or not line.path or not mode or mode[1] ~= "SEGMENT" then return nil end
+    local text = game.stretchText(line, mode[2],
+        _("Adds a waypoint between {from} and {to}. Point at the route to choose another part of the line."))
+    if not text then return {enabled = false, tooltip = _("Select a stretch of the line first.")} end
+    return {enabled = true, tooltip = text}
 end
 
 local Panel = react.RegisterRecipe("EasierWaypointsPanel", function(params)
     local children = {}
     local ok, state = pcall(panelState, params.commonParams)
     if ok and state then
-        if state.text then
-            -- Display names are plain text: never insert them into rich-text markup.
-            children[#children + 1] = builtin.TextView {meta = {class = "font-scale-body"}, text = state.text}
-        end
-        children[#children + 1] = builtin.TextView {
-            meta = {class = "font-scale-annotation"}, text = state.hint, inlineHintSupport = true,
+        children[#children + 1] = builtin.Component {
+            meta = {class = "ew-waypoint-row"},
+            layout = builtin.BoxLayout {
+                orientation = builtin.type.Orientation.Horizontal,
+                children = {buttons.makeIconTextButton("secondary, ew-add-waypoint", WAYPOINT_ICON, _("Add Waypoint"),
+                    function() placement.start(params.commonParams) end, state.tooltip, state.enabled, nil,
+                    "font-scale-annotation")},
+            },
         }
-        if state.place then
-            children[#children + 1] = buttons.makeTextButton("primary", _("Place Waypoint"), function()
-                placement.start(params.commonParams)
-            end, _("Highlights the lane and its direction under the cursor before you click."), false)
-        end
     end
     children[#children + 1] = react.CallOriginalRecipe(nativePanel, params)
     return vertical(children)
@@ -77,7 +70,7 @@ end)
 local replacements = {
     {tooltips.LMAddWaypoint, tooltipReplacement("EasierWaypointsAdd", tooltips.LMAddWaypoint)},
     {tooltips.LMPromptWaypointModifier, tooltipReplacement("EasierWaypointsPrompt", tooltips.LMPromptWaypointModifier, function()
-        return _("Clicking alone does nothing here: hold [iaHint=IA_PRECISION_MODE/] while clicking to add the waypoint.")
+        return _("Hold the key shown above while clicking. A click on its own does nothing here.")
     end)},
     {tooltips.LMMoveWaypointTarget, tooltipReplacement("EasierWaypointsMove", tooltips.LMMoveWaypointTarget)},
     {nativePanel, Panel},

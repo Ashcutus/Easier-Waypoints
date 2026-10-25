@@ -85,6 +85,31 @@ function M.compatible(lineCarriers, laneCarriers)
     return false
 end
 
+-- Closest lane the line's vehicles can use, measured on the ground plane.
+-- Returns {entity, index (zero-based), param} or nil beyond maxDistance.
+function M.nearestLane(position, entities, backend, lineCarriers, maxDistance)
+    local p = xyz(position)
+    if not p then return nil end
+    local best, bestDistance
+    for _, entity in ipairs(entities) do
+        local info = backend.edgeInfo(entity)
+        for index, edge in ipairs(info and info.edges or {}) do
+            if edge.geometry and M.compatible(lineCarriers, backend.laneCarriers(edge.transportModes)) then
+                local param = backend.locate(edge.geometry, p)
+                local sample = param and backend.sample(edge.geometry, param)
+                local point = sample and xyz(sample[1])
+                if point then
+                    local distance = math.sqrt((point.x - p.x) ^ 2 + (point.y - p.y) ^ 2)
+                    if distance <= maxDistance and (not best or distance < bestDistance) then
+                        best, bestDistance = {entity = entity, index = index - 1, param = param}, distance
+                    end
+                end
+            end
+        end
+    end
+    return best
+end
+
 local function segments(p, t, sign, result)
     local function point(distance, side)
         return {x = p.x + t.x * distance - t.y * side,

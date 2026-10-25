@@ -4,13 +4,14 @@ local react = ug_require "::/gui/main/react.lua"
 local builtin = ug_require "::/gui/main/builtin.lua"
 local appUtil = ug_require "::/scripts/app_util.tl"
 local hudUtil = ug_require "::/gui/hud/hud_react_util.tl"
-local langUtil = ug_require "::/scripts/lang_util.tl"
 local lineUtil = ug_require "::/gui/line_vehicle_mgmt/line_util.tl"
 local direction = ug_require "easier_waypoints::/plugins/easier_waypoints/direction.lua"
 local game = ug_require "easier_waypoints::/plugins/easier_waypoints/game.lua"
 
 local M = {}
 local NAME = "EasierWaypointsPlacement"
+local ROUTE_SEARCH_RADIUS = 20
+local ROUTE_LANE_DISTANCE = 8
 
 local function append(list, item)
     if item ~= nil then list[#list + 1] = item end
@@ -23,26 +24,45 @@ local function session(param)
     local common = param.commonParams
     local line = common.lineState and common.lineState:old()
     local mode = common.getModeState()
-    if not line or not line.entityAndRevision or line.entityAndRevision.entity ~= param.line then return nil end
+    if not line or not line.path or not line.entityAndRevision or line.entityAndRevision.entity ~= param.line then return nil end
     if not mode or mode[1] ~= "SEGMENT" then return nil end
-    local after, before, nextStop = game.stretch(line, mode[2])
-    if not after then return nil end
     local carriers = game.lineCarriers(lineUtil.getLineCarriers(line))
     local filters = common.gameCtx and common.gameCtx.filters and common.gameCtx.filters:get()
     local protectedEntities = filters and filters.protectedEntities
     return {
-        common = common, line = line, mode = mode[2], after = after, before = before, nextStop = nextStop,
+        common = common, line = line, lineEntity = param.line, mode = mode[2],
+        after = game.stretch(line, mode[2]),
         carriers = carriers, points = carriers.WATER or carriers.AIR,
         protected = protectedEntities and lineUtil.isStopProtected(param.line, nil, protectedEntities) or false,
     }
 end
 
-local function target(details)
-    if not details then return nil end
+local function laneKey(snap)
+    return tostring(snap.edgeId.entity) .. ":" .. tostring(snap.edgeId.index) .. ":" .. string.format("%.4f", snap.param)
+end
+
+-- A pick on the drawn route names the exact leg (stop and waypoint sub-segment)
+-- but no lane, so the lane is the nearest usable one under the cursor.
+local function routeTarget(picked, state)
+    if state.points or picked.entity ~= state.lineEntity or type(picked.stopNumber) ~= "number" then return nil end
+    local after = game.stretch(state.line, picked.stopNumber)
+    if not after then return nil end
+    local position = game.backend.cursorPosition()
+    local lane = position and direction.nearestLane(position, game.backend.networksNear(position, ROUTE_SEARCH_RADIUS),
+        game.backend, state.carriers, ROUTE_LANE_DISTANCE)
+    if not lane then return {route = true, after = after, key = "route:" .. tostring(after) .. ":none"} end
+    local snap = api.type.EdgePos.new()
+    snap.edgeId = api.type.EdgeId.new(lane.entity, lane.index)
+    snap.param = lane.param
+    return {route = true, after = after, snap = snap, key = "route:" .. tostring(after) .. ":" .. laneKey(snap)}
+end
+
+local function target(details, state)
+    if not details or not state then return nil end
+    if details.line then return routeTarget(details.line, state) end
     if details.transportNetworkEdge then
         local snap = details.transportNetworkEdge.snap
-        return {snap = snap, key = "lane:" .. tostring(snap.edgeId.entity) .. ":" .. tostring(snap.edgeId.index)
-            .. ":" .. string.format("%.4f", snap.param)}
+        return {snap = snap, key = "lane:" .. laneKey(snap)}
     end
     if details.world then
         local pos = details.world.pos
@@ -65,10 +85,12 @@ local function evaluate(state, aim)
         elseif lineUtil.isWaypointTooClose(state.line, aim.pos, nil) then
             candidate.problem = _("Too close to another waypoint.")
         end
+    elseif aim.route and not aim.snap then
+        candidate = {route = true, problem = _("No lane found under the route here. Point at the road or track itself.")}
     else
         if not aim.snap then return nil end
         local ok, preview = pcall(direction.preview, {edgePos = aim.snap}, game.backend)
-        candidate = {snap = aim.snap, preview = ok and preview or nil}
+        candidate = {snap = aim.snap, route = aim.route, preview = ok and preview or nil}
         if not ok then
             game.warnOnce("placement lane data unreadable", preview)
             candidate.problem = _("This lane's data couldn't be read, so no waypoint can be placed here.")
@@ -78,10 +100,19 @@ local function evaluate(state, aim)
             candidate.problem = _("This line's vehicles can't use the highlighted lane.")
         end
     end
+    if not candidate.problem and not aim.route and not state.after then
+        candidate.problem = _("Select a stretch of the line first, or point at the route.")
+    end
     if not candidate.problem and state.protected then
         candidate.problem = _("This line can't be edited right now.")
     end
     return candidate
+end
+
+-- Route picks insert into their own leg; other picks use the selected stretch.
+local function stretchMode(state, aim)
+    if aim and aim.route then return aim.after end
+    return state.mode
 end
 
 local function place(param, aim)
@@ -90,7 +121,7 @@ local function place(param, aim)
     if param.closed or not candidate or candidate.problem or aim.key == param.placedKey then return false end
     local waypoint = api.type.Waypoint.new()
     if candidate.snap then waypoint.edgePos = candidate.snap else waypoint.pos = candidate.pos end
-    state.common.addWaypoint(waypoint, state.mode)
+    state.common.addWaypoint(waypoint, stretchMode(state, aim))
     param.placedKey = aim.key
     pcall(function()
         local sounds = api.gui.genericRep.get(api.gui.genericRep.find("::/gui/line_vehicle_mgmt/sound/lvm_sfx.gres")).data
@@ -100,12 +131,12 @@ local function place(param, aim)
 end
 
 -- drawn is false when the candidate should have an overlay but none could be built.
-local function tooltipParam(state, candidate, drawn)
-    local finish = _("Press [iaHint=IA_MENU_BACK/] to finish.")
+local function tooltipParam(state, aim, candidate, drawn)
+    local finish = _("Right-click or press Esc to finish.")
     if not state then
-        return {hint = _("This stretch is no longer selected.") .. " " .. finish}
+        return {hint = _("This line is no longer being edited.") .. " " .. finish}
     end
-    local result = {stretch = game.stretchText(state.line, state.mode, _("Adding waypoints between {from} and {to}."))}
+    local result = {stretch = game.stretchText(state.line, stretchMode(state, aim), _("Adds a waypoint between {from} and {to}."))}
     if candidate then
         result.problem = candidate.problem
         if not drawn then
@@ -113,13 +144,13 @@ local function tooltipParam(state, candidate, drawn)
         elseif candidate.preview then
             result.detail = game.directionText(candidate.preview)
         end
-        result.hint = candidate.problem and finish or (_("Click to add a waypoint here.") .. " " .. finish)
+        result.hint = candidate.problem and finish or (_("Click to add it here.") .. " " .. finish)
     elseif state.carriers.AIR then
         result.hint = _("Point at the place the aircraft should fly over.") .. " " .. finish
     elseif state.points then
         result.hint = _("Point at the water the ship should pass through.") .. " " .. finish
     else
-        result.hint = _("Point at the lane the vehicles should use; the other side of a road runs the other way.") .. " " .. finish
+        result.hint = _("Point at the line's route or at a lane. The other side of a road runs the other way.") .. " " .. finish
     end
     return result
 end
@@ -129,7 +160,7 @@ local Tooltip = react.RegisterRecipe("EasierWaypointsPlacementTooltip", function
     if param.stretch then append(children, game.tooltipText(param.stretch)) end
     if param.problem then append(children, game.tooltipText(param.problem)) end
     if param.detail then append(children, game.tooltipText(param.detail)) end
-    if param.hint then append(children, game.tooltipText(param.hint, true)) end
+    if param.hint then append(children, game.tooltipText(param.hint)) end
     return builtin.BoxLayout {orientation = builtin.type.Orientation.Vertical, children = children}
 end)
 
@@ -149,12 +180,12 @@ local function convert(entity, details)
     return ok and result or nil
 end
 
-local function lineViewer(param, state, candidate)
+local function lineViewer(param, state, aim, candidate)
     local visual = builtin.type.LineVisualization.new()
     visual.entity = param.line
     visual.transparency = 1.0
-    local highlight = state and lineUtil.computeStopAndWaypointIndex0(param.line,
-        state.after >= 1 and state.after or #state.line.path)
+    local after = state and ((aim and aim.route) and aim.after or state.after)
+    local highlight = after and lineUtil.computeStopAndWaypointIndex0(param.line, after >= 1 and after or #state.line.path)
     local snapPreview
     if candidate and candidate.snap and not candidate.problem then
         snapPreview = api.gui.SelectionDetails.TransportNetworkEdge.new()
@@ -172,8 +203,9 @@ local function lineViewer(param, state, candidate)
         highlightedTerminal = api.type.StationTerminal.new(-1, -2),
         snapPreview = snapPreview,
         showTerminals = false,
-        -- false lets the lane under an existing line be picked, as when holding the modifier
-        preferLineOverTransportNetworkEdge = false,
+        -- Lane lines pick the drawn route first, so clicking it names the leg.
+        -- Ships and aircraft place free points, which the route would block.
+        preferLineOverTransportNetworkEdge = not (state and state.points),
     }
 end
 
@@ -197,7 +229,8 @@ end
 local function action(param, ctx)
     local aimState = react.useState(nil)
     local state = session(param)
-    local candidate = evaluate(state, aimState:old())
+    local aim = aimState:old()
+    local candidate = evaluate(state, aim)
 
     local function close()
         if param.closed then return end
@@ -205,23 +238,23 @@ local function action(param, ctx)
         ctx.popSelf()
     end
     local function hover(entity, _indices, details)
-        local aim = target(convert(entity, details))
+        local hovered = target(convert(entity, details), session(param))
         local old = aimState:old()
-        if (aim and aim.key) ~= (old and old.key) then aimState:set(aim) end
+        if (hovered and hovered.key) ~= (old and old.key) then aimState:set(hovered) end
     end
     local function choose(entity, _indices, details)
-        local aim = target(convert(entity, details))
-        return aim ~= nil and place(param, aim)
+        local chosen = target(convert(entity, details), session(param))
+        return chosen ~= nil and place(param, chosen)
     end
 
     react.useInputAction("IA_MENU_BACK", react.iaHandler(close, function() return true end, _("Finish")))
     react.useInputAction("IA_SELECT", react.iaHandler(function()
-        local aim = aimState:old()
-        if aim then place(param, aim) end
+        local current = aimState:old()
+        if current then place(param, current) end
     end, function() return candidate ~= nil and not candidate.problem end, _("Add Waypoint")))
 
     local children = {}
-    append(children, lineViewer(param, state, candidate))
+    append(children, lineViewer(param, state, aim, candidate))
     append(children, builtin.Selector {
         onHover = hover,
         onSelect = choose,
@@ -231,7 +264,7 @@ local function action(param, ctx)
     })
     local overlayNode, drawn = overlay(candidate)
     append(children, overlayNode)
-    append(children, builtin.ActionTooltip {recipe = Tooltip, param = tooltipParam(state, candidate, drawn)})
+    append(children, builtin.ActionTooltip {recipe = Tooltip, param = tooltipParam(state, aim, candidate, drawn)})
     return builtin.ActionDescriptor {
         children = children,
         onBack = close,
@@ -251,7 +284,7 @@ M.Tool = react.RegisterTool {
     shelve = function() end,
 }
 
--- Only offered when a stretch is selected; the Line Manager stays open underneath.
+-- Offered from the stop panel; the Line Manager stays open underneath.
 function M.start(common)
     local line = common.lineState and common.lineState:old()
     local entity = line and line.entityAndRevision and line.entityAndRevision.entity

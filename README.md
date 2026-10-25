@@ -14,12 +14,19 @@ direction cross-check, stretch resolution, UI delegation, the placement tool, Lu
 Code was checked against Linux Steam preview build 26129055. 0.2.0 stays
 **experimental** until it passes the in-game smoke test below.
 
-- **Place Waypoint** in the stop panel opens a placement tool on top of the Line
-  Manager. It highlights the lane under the cursor (cyan, or red where the line's
-  vehicles can't go), draws the direction of travel, and names the stretch. Each
-  click adds the next waypoint in order; Back finishes. No modifier key is needed.
-- The native flow still works. Its tooltips now say that the precision-mode key
-  (shown as a key hint) must be held while clicking, and they explain direction.
+- A small **Add Waypoint** button sits above the stop list while a line is being
+  edited; its tooltip names the stretch. It opens a placement tool on top of the
+  Line Manager that highlights the lane under the cursor (cyan, or red where the
+  line's vehicles can't go), draws the direction of travel and names the stretch.
+  Each click adds the next waypoint in order; right-click or Esc finishes. No
+  modifier key is needed.
+- **Click the route** in the placement tool to add a waypoint to that part of the
+  line. The game reports which leg was clicked; the waypoint goes on the nearest
+  lane the line can use, previewed before the click. Ships and aircraft place free
+  points instead.
+- The native flow still works. Its tooltips now say that the key shown in the
+  game's own prompt must be held while clicking, and they explain direction.
+  All text is plain; key-hint markup did not render in the stop panel.
 - Arrows only appear when the lanes at that spot agree with the street's own lane
   config. Otherwise the lane is highlighted without an arrow and the tooltip says
   the direction couldn't be confirmed. Tracks are shown as usable both ways.
@@ -27,7 +34,7 @@ Code was checked against Linux Steam preview build 26129055. 0.2.0 stays
   the game's own rules.
 - If a highlight or marker can't be drawn, the tooltip says the preview is
   unavailable instead of describing it, and a warning is logged once per cause.
-- The stop panel shows the stretch the game will really edit. This includes the
+- The stretch named is the one the game will really edit. This includes the
   "no stretch selected" case, where native `addWaypoint` inserts before the last
   entry rather than appending.
 - Every change is committed by the Line Manager's own `addWaypoint`. Hovering and
@@ -54,7 +61,7 @@ Build the ZIP with `python3 scripts/package_release.py`. Back up the save you te
 with. Open the game's user-data folder from Settings → Advanced, then put the
 `easier_waypoints_1` folder from the ZIP into its development `staging_area`.
 Restart the game and enable Easier Waypoints. In the Line Manager, select a line,
-then the stretch to edit, and press **Place Waypoint**.
+then the stretch to edit, and press **Add Waypoint**.
 
 Smoke test, in order:
 
@@ -64,13 +71,16 @@ Smoke test, in order:
    match real traffic on each side.
 3. Place three distinct waypoints and check they appear in that order in the stop
    list, each on the highlighted lane, with hovering editing nothing.
-4. Press Back and check the Line Manager returns with the line and stretch intact.
-5. Then: ship and aircraft placement, gamepad input and stop-list focus.
+4. Click the route on a different part of the line and check the waypoint lands in
+   that part, on the previewed lane.
+5. Press Esc and check the Line Manager returns with the line and stretch intact.
+6. Then: ship and aircraft placement, gamepad input and stop-list focus.
 
 Further checks: one-way and tram streets, junction approaches and tracks; whether
 the native-flow tooltip overlay renders (it may not, from a tooltip); after moving
-a waypoint, the panel's stretch matches where the next native Shift-click lands;
-bridges, tunnels, slopes and UI scaling.
+a waypoint, the button's stretch matches where the next native Shift-click lands;
+route clicks on bridges and in tunnels (the ground point lies below the deck);
+slopes and UI scaling.
 
 ## Development checks
 
