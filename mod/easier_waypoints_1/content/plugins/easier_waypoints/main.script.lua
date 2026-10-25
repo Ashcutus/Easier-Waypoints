@@ -11,15 +11,18 @@ local function vertical(children)
     return builtin.BoxLayout {orientation = builtin.type.Orientation.Vertical, children = children}
 end
 
--- Tooltips only receive the hovered candidate. Bad lane data or an unavailable
--- renderer keeps the native tooltip; the overlay is optional on top of the text.
+-- Tooltips only receive the hovered candidate. Bad lane data keeps the native
+-- tooltip; direction text is only shown alongside an overlay that was built.
 local function laneChildren(waypoint)
     local ok, preview = pcall(direction.preview, waypoint, game.backend)
+    if not ok then game.warnOnce("tooltip lane data unreadable", preview) end
     if not ok or not preview then return {} end
-    local children = {game.tooltipText(game.directionText(preview))}
     local rendered, overlay = pcall(game.laneOverlay, preview, true)
-    if rendered and overlay then children[#children + 1] = overlay end
-    return children
+    if rendered and overlay then
+        return {game.tooltipText(game.directionText(preview)), overlay}
+    end
+    game.warnOnce("tooltip lane preview unavailable", rendered and "nothing to draw" or overlay)
+    return {game.tooltipText(game.previewUnavailableText(false, false))}
 end
 
 local function tooltipReplacement(name, original, instruction)

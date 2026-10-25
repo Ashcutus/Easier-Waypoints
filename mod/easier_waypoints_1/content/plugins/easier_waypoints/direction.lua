@@ -109,6 +109,10 @@ function M.arrowSegments(preview)
     return result
 end
 
+function M.validPoint(position)
+    return xyz(position) ~= nil
+end
+
 -- Ship and aircraft waypoints are points: a flat cross with a short post.
 function M.markerSegments(position)
     local p = xyz(position)

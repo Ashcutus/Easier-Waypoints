@@ -58,7 +58,9 @@ local function evaluate(state, aim)
     if state.points then
         if not aim.pos then return nil end
         candidate = {pos = aim.pos}
-        if state.carriers.WATER and not state.carriers.AIR and not aim.water then
+        if not direction.validPoint(aim.pos) then
+            candidate.problem = _("This position couldn't be read, so no waypoint can be placed here.")
+        elseif state.carriers.WATER and not state.carriers.AIR and not aim.water then
             candidate.problem = _("Ship waypoints must be on water.")
         elseif lineUtil.isWaypointTooClose(state.line, aim.pos, nil) then
             candidate.problem = _("Too close to another waypoint.")
@@ -67,7 +69,10 @@ local function evaluate(state, aim)
         if not aim.snap then return nil end
         local ok, preview = pcall(direction.preview, {edgePos = aim.snap}, game.backend)
         candidate = {snap = aim.snap, preview = ok and preview or nil}
-        if not candidate.preview then
+        if not ok then
+            game.warnOnce("placement lane data unreadable", preview)
+            candidate.problem = _("This lane's data couldn't be read, so no waypoint can be placed here.")
+        elseif not candidate.preview then
             candidate.problem = _("This is not a lane vehicles can use.")
         elseif not direction.compatible(state.carriers, candidate.preview.carriers) then
             candidate.problem = _("This line's vehicles can't use the highlighted lane.")
@@ -94,7 +99,8 @@ local function place(param, aim)
     return true
 end
 
-local function tooltipParam(state, candidate)
+-- drawn is false when the candidate should have an overlay but none could be built.
+local function tooltipParam(state, candidate, drawn)
     local finish = _("Press [iaHint=IA_MENU_BACK/] to finish.")
     if not state then
         return {hint = _("This stretch is no longer selected.") .. " " .. finish}
@@ -102,7 +108,11 @@ local function tooltipParam(state, candidate)
     local result = {stretch = game.stretchText(state.line, state.mode, _("Adding waypoints between {from} and {to}."))}
     if candidate then
         result.problem = candidate.problem
-        result.detail = candidate.preview and game.directionText(candidate.preview) or nil
+        if not drawn then
+            result.detail = game.previewUnavailableText(candidate.pos ~= nil, not candidate.problem)
+        elseif candidate.preview then
+            result.detail = game.directionText(candidate.preview)
+        end
         result.hint = candidate.problem and finish or (_("Click to add a waypoint here.") .. " " .. finish)
     elseif state.carriers.AIR then
         result.hint = _("Point at the place the aircraft should fly over.") .. " " .. finish
@@ -167,13 +177,21 @@ local function lineViewer(param, state, candidate)
     }
 end
 
+-- Returns the overlay node and whether everything the candidate needs was drawn.
 local function overlay(candidate)
-    if not candidate then return nil end
-    local ok, node = pcall(function()
-        if candidate.preview then return game.laneOverlay(candidate.preview, not candidate.problem) end
-        if candidate.pos then return game.pointOverlay(candidate.pos, not candidate.problem) end
-    end)
-    return ok and node or nil
+    local build
+    if candidate and candidate.preview then
+        build = function() return game.laneOverlay(candidate.preview, not candidate.problem) end
+    elseif candidate and candidate.pos then
+        build = function() return game.pointOverlay(candidate.pos, not candidate.problem) end
+    else
+        return nil, true
+    end
+    local ok, node = pcall(build)
+    if ok and node then return node, true end
+    game.warnOnce(candidate.pos and "placement marker unavailable" or "placement lane preview unavailable",
+        ok and "nothing to draw" or node)
+    return nil, false
 end
 
 local function action(param, ctx)
@@ -211,8 +229,9 @@ local function action(param, ctx)
         lineViewerSupport = true,
         stopOnMenuBack = false,
     })
-    append(children, overlay(candidate))
-    append(children, builtin.ActionTooltip {recipe = Tooltip, param = tooltipParam(state, candidate)})
+    local overlayNode, drawn = overlay(candidate)
+    append(children, overlayNode)
+    append(children, builtin.ActionTooltip {recipe = Tooltip, param = tooltipParam(state, candidate, drawn)})
     return builtin.ActionDescriptor {
         children = children,
         onBack = close,

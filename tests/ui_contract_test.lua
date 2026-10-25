@@ -77,6 +77,8 @@ end}
 local langUtil = {format = function(message, values) return (message:gsub("{(.-)}", function(k) return tostring(values[k]) end)) end}
 local nativePanel = {name = "native panel"}
 local tooltips = {LMAddWaypoint = {}, LMPromptWaypointModifier = {}, LMMoveWaypointTarget = {}}
+local warnings = {}
+local log = {warning = function(message) warnings[#warnings + 1] = message end}
 
 local function environment(reactApi, builtins, tips, panel, buttonApi)
     local env, cache = nil, {}
@@ -86,7 +88,7 @@ local function environment(reactApi, builtins, tips, panel, buttonApi)
         ["lang_util.tl"] = langUtil, ["app_util.tl"] = {isGamepadInputMode = function() return false end},
         ["hud_react_util.tl"] = {makeDefaultLineViewerSnapFactors = function() return {view = 0.05, world = 10} end},
     }
-    env = setmetatable({api = api, _ = function(text) return text end, ug_require = function(path)
+    env = setmetatable({api = api, log = log, _ = function(text) return text end, ug_require = function(path)
         local own = path:match("^easier_waypoints::/plugins/easier_waypoints/(.+)$")
         if own then
             cache[own] = cache[own] or assert(loadfile(root .. own, "t", env))()
@@ -142,7 +144,11 @@ assert(#result.children == 1, "Footpath feedback unchanged")
 local constructor = builtin.type.EdgeRenderable.Edge.new
 builtin.type.EdgeRenderable.Edge.new = function() error("unsupported renderer") end
 result = replacements[tooltips.LMAddWaypoint].fn(candidate)
-assert(#result.children == 2 and result.children[2].kind == "text", "Unavailable renderer keeps text, drops overlay")
+assert(#result.children == 2 and result.children[2].text:find("Preview unavailable", 1, true)
+    and not result.children[2].text:find("direction of travel", 1, true), "Never describe an arrow that wasn't drawn")
+assert(not result.children[2].text:find("Clicking", 1, true), "The native prompt state still needs the modifier")
+replacements[tooltips.LMMoveWaypointTarget].fn(candidate)
+assert(#warnings == 1 and warnings[1]:find("tooltip lane preview unavailable", 1, true), "Each failure condition is logged once")
 builtin.type.EdgeRenderable.Edge.new = constructor
 
 -- Stop panel: mode-aware text, the stretch native addWaypoint will edit, and the tool button.
@@ -151,17 +157,47 @@ local actionFn
 local line = {entityAndRevision = {entity = 77}, carriers = {road = true},
     path = {{stop = {stationGroup = 10}}, {waypoint = {}}, {stop = {stationGroup = 20}}}}
 local mode = {"SEGMENT", 1}
+
+-- Tool stack double: a stacked push shelves the Line Manager and a pop restores it.
+local manager = {shelved = false}
+manager.shelve = function(_, _, shelve) manager.shelved = shelve end
+local stack = {{tool = manager}}
+local stackApi
+stackApi = {
+    push = function(tool, key, param, stacking)
+        assert(tool == tools.EasierWaypointsPlacement and key == nil and stacking == true and param.line == 77)
+        local below = stack[#stack]
+        below.tool.shelve(below.ctx, below.param, true)
+        local entry = {tool = tool, param = param}
+        entry.ctx = {setActionFn = function(fn, name) actionFn = fn; assert(name == "EasierWaypointsPlacement") end,
+            popSelf = function() stackApi.pop(tool, key) end}
+        stack[#stack + 1] = entry
+        pushed = pushed + 1
+        tool.push(entry.ctx, param)
+    end,
+    pop = function(tool)
+        local entry = stack[#stack]
+        if entry.tool ~= tool then return end
+        stack[#stack] = nil
+        popped = popped + 1
+        tool.pop(entry.ctx, entry.param)
+        local below = stack[#stack]
+        below.tool.shelve(below.ctx, below.param, false)
+    end,
+}
 local common = {
     lineState = {old = function() return line end},
     getModeState = function() return mode end,
-    addWaypoint = function(waypoint, insertAt) added[#added + 1] = {waypoint = waypoint, insertAt = insertAt} end,
+    -- Mirrors native addWaypoint: insert after the selected entry, or before the
+    -- last one when none is selected, then select the stretch after the new waypoint.
+    addWaypoint = function(waypoint, insertAt)
+        local at = insertAt and insertAt + 1 or math.max(#line.path, 1)
+        table.insert(line.path, at, {waypoint = waypoint})
+        added[#added + 1] = {waypoint = waypoint, insertAt = insertAt}
+        mode = {"SEGMENT", at}
+    end,
     gameCtx = {filters = {get = function() return {protectedEntities = {}} end},
-        toolStack = {get = function() return {getApi = function() return {push = function(tool, key, param, stacking)
-            assert(tool == tools.EasierWaypointsPlacement and key == nil and stacking == true and param.line == 77)
-            pushed = pushed + 1
-            tool.push({setActionFn = function(fn, name) actionFn = fn; assert(name == "EasierWaypointsPlacement") end,
-                popSelf = function() popped = popped + 1 end}, param)
-        end} end} end}},
+        toolStack = {get = function() return {getApi = function() return stackApi end} end}},
 }
 local params = {commonParams = common}
 result = replacements[nativePanel].fn(params)
@@ -192,62 +228,92 @@ common.lineState = nil
 assert(#replacements[nativePanel].fn(params).children == 1, "No line state: native panel only")
 common.lineState = {old = function() return line end}
 
--- Placement tool: hover only reads, click commits once through native addWaypoint.
+-- Placement tool: hover only reads; each click commits once through native addWaypoint.
 local function render()
     hookIndex = 0
     local descriptor = actionFn()
     assert(descriptor.kind == "action" and descriptor.onBack)
     return descriptor, find(descriptor.children, "selector"), find(descriptor.children, "tooltip")
 end
+mode = {"SEGMENT", nil} -- the Line Manager's state after a waypoint was moved
 result = replacements[nativePanel].fn(params)
 result.children[3].onClick()
-assert(pushed == 1 and actionFn, "Button pushes the stacked placement tool")
+assert(pushed == 1 and actionFn and manager.shelved, "Button pushes the placement tool over the shelved Line Manager")
 local descriptor, selector, tooltip = render()
 assert(selector.lineViewerSupport and find(descriptor.children, "lineViewer").preferLineOverTransportNetworkEdge == false)
 assert(not find(descriptor.children, "overlay") and tooltip.param.stretch == "Adding waypoints between Station 10 and Station 20.")
-local snap = {edgeId = {entity = 1, index = 1}, param = 0.5}
-selector.onHover(1, {}, {transportNetworkEdge = {snap = snap}})
-assert(#added == 0, "Hovering never edits the line")
+local snaps = {}
+for i, param in ipairs({0.2, 0.5, 0.8}) do
+    snaps[i] = {edgeId = {entity = 1, index = 1}, param = param}
+    selector.onHover(1, {}, {transportNetworkEdge = {snap = snaps[i]}})
+    assert(#added == i - 1, "Hovering never edits the line")
+    descriptor, selector, tooltip = render()
+    overlay = find(descriptor.children, "overlay")
+    assert(overlay and #overlay.edges == 4, "Overlay is a direct ActionDescriptor child")
+    assert(tooltip.param.detail:find("direction of travel", 1, true) and not tooltip.param.problem)
+    assert(tooltip.param.stretch == "Adding waypoints between Station 10 and Station 20.", "Every click stays in the stretch")
+    assert(find(descriptor.children, "lineViewer").snapPreview.snap == snaps[i])
+    assert(selector.onSelect(1, {}, {transportNetworkEdge = {snap = snaps[i]}}) == true)
+    inputActions.IA_SELECT.fn()
+    assert(#added == i, "One native add per click")
+    descriptor, selector, tooltip = render()
+end
+assert(#line.path == 6 and line.path[2].waypoint and line.path[6].stop.stationGroup == 20)
+for i = 1, 3 do
+    assert(line.path[2 + i].waypoint.edgePos == snaps[i], "Consecutive clicks keep their order along the line")
+end
+assert(added[1].insertAt == nil and added[2].insertAt == 3 and added[3].insertAt == 4, "Each click follows the last one")
+
+-- A preview that cannot be drawn is reported once and described honestly.
+builtin.type.EdgeRenderable.Edge.new = function() error("unsupported renderer") end
+local lane0 = {edgeId = {entity = 1, index = 0}, param = 0.4}
+selector.onHover(1, {}, {transportNetworkEdge = {snap = lane0}})
+render()
 descriptor, selector, tooltip = render()
-overlay = find(descriptor.children, "overlay")
-assert(overlay and #overlay.edges == 4, "Overlay is a direct ActionDescriptor child")
-assert(tooltip.param.detail:find("direction of travel", 1, true) and not tooltip.param.problem)
-assert(find(descriptor.children, "lineViewer").snapPreview.snap == snap)
-assert(selector.onSelect(1, {}, {transportNetworkEdge = {snap = snap}}) == true)
-inputActions.IA_SELECT.fn()
-assert(#added == 1 and added[1].waypoint.edgePos == snap and added[1].insertAt == 1, "One native add per click")
-selector.onHover(2, {}, {transportNetworkEdge = {snap = {edgeId = {entity = 2, index = 0}, param = 0.5}}})
+assert(not find(descriptor.children, "overlay") and tooltip.param.detail:find("Preview unavailable", 1, true)
+    and not tooltip.param.detail:find("arrow", 1, true), "Never describe an arrow nobody can see")
+assert(tooltip.param.detail:find("still uses the lane", 1, true) and inputActions.IA_SELECT.enabled(), "Placement stays available")
+assert(#warnings == 2 and warnings[2]:find("placement lane preview unavailable", 1, true), "Logged once per failure condition")
+builtin.type.EdgeRenderable.Edge.new = constructor
+
+local trackSnap = {edgeId = {entity = 2, index = 0}, param = 0.5}
+selector.onHover(2, {}, {transportNetworkEdge = {snap = trackSnap}})
 descriptor, selector, tooltip = render()
 assert(tooltip.param.problem:find("can't use", 1, true) and not inputActions.IA_SELECT.enabled(), "Road line rejects tracks")
-assert(selector.onSelect(2, {}, {transportNetworkEdge = {snap = {edgeId = {entity = 2, index = 0}, param = 0.5}}}) == false)
-assert(#added == 1)
+assert(selector.onSelect(2, {}, {transportNetworkEdge = {snap = trackSnap}}) == false and #added == 3)
 stopProtected = true
 selector.onHover(1, {}, {transportNetworkEdge = {snap = {edgeId = {entity = 1, index = 0}, param = 0.25}}})
 descriptor, selector, tooltip = render()
-assert(tooltip.param.problem:find("can't be edited", 1, true) and #added == 1, "Protected lines are explained, not edited")
+assert(tooltip.param.problem:find("can't be edited", 1, true) and #added == 3, "Protected lines are explained, not edited")
 stopProtected = false
 line.carriers = {water = true}
 selector.onHover(5, {}, {world = {pos = vec(9, 9, 0), water = false}})
 descriptor, selector, tooltip = render()
 assert(tooltip.param.problem == "Ship waypoints must be on water." and descriptor.terrainCirclePolicy == "Always")
+selector.onHover(5, {}, {world = {pos = vec(0/0, 9, 0), water = true}})
+descriptor, selector, tooltip = render()
+assert(tooltip.param.problem:find("couldn't be read", 1, true) and not tooltip.param.detail:find("Clicking", 1, true),
+    "An unreadable point is refused, not offered as clickable")
 selector.onHover(5, {}, {world = {pos = vec(9, 9, 0), water = true}})
 descriptor, selector = render()
 assert(#find(descriptor.children, "overlay").edges == 3, "Ship waypoint marker")
 selector.onSelect(5, {}, {world = {pos = vec(9, 9, 0), water = true}})
-assert(#added == 2 and added[2].waypoint.pos.x == 9 and added[2].waypoint.edgePos == nil)
+assert(#added == 4 and line.path[6].waypoint.pos.x == 9 and line.path[6].waypoint.edgePos == nil and line.path[7].stop)
+local finalMode = mode
 line.carriers = {air = true}
 tooClose = true
 selector.onHover(5, {}, {world = {pos = vec(30, 9, 90), water = false}})
 descriptor, selector, tooltip = render()
-assert(tooltip.param.problem == "Too close to another waypoint." and #added == 2)
+assert(tooltip.param.problem == "Too close to another waypoint." and #added == 4)
 tooClose = false
 mode = {"MOVE_STOP", {}}
 descriptor, selector, tooltip = render()
 assert(tooltip.param.hint:find("no longer selected", 1, true) and not find(descriptor.children, "overlay"))
+mode = finalMode
 inputActions.IA_MENU_BACK.fn()
 descriptor.onBack()
-assert(popped == 1, "Back pops the tool exactly once")
-tools.EasierWaypointsPlacement.pop(nil, {})
+assert(popped == 1 and #stack == 1, "Back pops the tool exactly once")
+assert(not manager.shelved and mode == finalMode and #line.path == 7, "The Line Manager returns with its state intact")
 print("PASS: UI delegation, mode-aware guidance, placement tool, invalid-data fallback and no simulation commands")
 
 -- Optional: execute the actual shipped Lua recipe registry with opaque node IDs.

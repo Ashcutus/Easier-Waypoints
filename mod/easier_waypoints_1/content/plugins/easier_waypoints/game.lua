@@ -13,6 +13,17 @@ local CARRIER_MODES = {
 }
 local LINE_CARRIERS = {"ROAD", "TRAM", "RAIL", "WATER", "AIR"}
 local TOOLTIP_CLASS = "lvm-selector-tooltip, font-scale-tooltip, default-tooltip-configuration"
+local warned = {}
+
+-- Hover re-renders constantly, so each failure condition is logged only once.
+function M.warnOnce(condition, detail)
+    local key = condition .. "|" .. (tostring(detail):gsub("%d+", "#"))
+    if warned[key] then return end
+    warned[key] = true
+    if type(log) == "table" and log.warning then
+        log.warning("Easier Waypoints: " .. condition .. ": " .. tostring(detail))
+    end
+end
 
 function M.laneCarriers(modes)
     local result = {}
@@ -123,6 +134,20 @@ function M.directionText(preview)
         return _("Vehicles can use the highlighted lane in either direction.")
     end
     return _("The direction of travel couldn't be confirmed for this lane, so no arrow is shown.")
+end
+
+-- Shown instead of the direction text whenever the overlay could not be built.
+function M.previewUnavailableText(point, clickStillWorks)
+    if point then
+        if clickStillWorks then
+            return _("Preview unavailable: the marker couldn't be drawn. Clicking still uses the point under the cursor.")
+        end
+        return _("Preview unavailable: the marker couldn't be drawn.")
+    end
+    if clickStillWorks then
+        return _("Preview unavailable: the lane highlight couldn't be drawn. Clicking still uses the lane under the cursor.")
+    end
+    return _("Preview unavailable: the lane highlight couldn't be drawn.")
 end
 
 -- Display names are plain text: only fixed strings may use inline key hints.

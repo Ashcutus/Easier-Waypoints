@@ -11,8 +11,8 @@ being edited. It covers road, tram, rail, ship and air lines.
 Version **0.2.0**, game revision **2**. Offline checks cover lane geometry, the
 direction cross-check, stretch resolution, UI delegation, the placement tool, Lua
 5.2 compatibility and release tooling. **Nothing has been verified in-game yet.**
-Code was checked against Linux Steam preview build 26129055. Treat this as a test
-build.
+Code was checked against Linux Steam preview build 26129055. 0.2.0 stays
+**experimental** until it passes the in-game smoke test below.
 
 - **Place Waypoint** in the stop panel opens a placement tool on top of the Line
   Manager. It highlights the lane under the cursor (cyan, or red where the line's
@@ -25,6 +25,8 @@ build.
   the direction couldn't be confirmed. Tracks are shown as usable both ways.
 - Ships and aircraft get a point marker. Water-on-land and too-close checks match
   the game's own rules.
+- If a highlight or marker can't be drawn, the tooltip says the preview is
+  unavailable instead of describing it, and a warning is logged once per cause.
 - The stop panel shows the stretch the game will really edit. This includes the
   "no stretch selected" case, where native `addWaypoint` inserts before the last
   entry rather than appending.
@@ -54,19 +56,21 @@ with. Open the game's user-data folder from Settings → Advanced, then put the
 Restart the game and enable Easier Waypoints. In the Line Manager, select a line,
 then the stretch to edit, and press **Place Waypoint**.
 
-In-game checks still needed, in order:
+Smoke test, in order:
 
-1. The mod loads without errors (check `stdout.txt` in the user-data folder).
-2. The placement tool's highlight, arrows and markers appear. Check whether the
-   native-flow tooltip overlay also appears; it may not render from a tooltip.
-3. Arrows match real traffic on both sides of a two-way road, a one-way road, a
-   tram street and a junction approach. Tracks show both ways.
-4. Clicks add exactly one waypoint each, in order, on the highlighted lane. Back
-   returns to the Line Manager with its state intact; hovering edits nothing.
-5. After moving a waypoint (no stretch selected), the panel's stretch matches where
-   the next native Shift-click lands.
-6. Ship and aircraft markers and rejections behave; gamepad focus on the stop list
-   still works; bridges, tunnels, slopes and UI scaling look right.
+1. The mod loads without errors or Easier Waypoints warnings (check `stdout.txt`
+   in the user-data folder).
+2. Preview both directions of a two-way road: the highlight and arrow appear and
+   match real traffic on each side.
+3. Place three distinct waypoints and check they appear in that order in the stop
+   list, each on the highlighted lane, with hovering editing nothing.
+4. Press Back and check the Line Manager returns with the line and stretch intact.
+5. Then: ship and aircraft placement, gamepad input and stop-list focus.
+
+Further checks: one-way and tram streets, junction approaches and tracks; whether
+the native-flow tooltip overlay renders (it may not, from a tooltip); after moving
+a waypoint, the panel's stretch matches where the next native Shift-click lands;
+bridges, tunnels, slopes and UI scaling.
 
 ## Development checks
 
@@ -98,7 +102,7 @@ Adapted from [Subsidy Manager](https://github.com/Ashcutus/Transport-Fever-3-Sub
 - `scripts/package_release.py` builds a deterministic runtime-only ZIP and SHA-256
   checksum. It never uploads or publishes anything.
 - Start each in-game upload changelog with `vMAJOR.MINOR.PATCH`, for example
-  `v0.2.0 — Placement tool for every line type`.
+  `v0.2.0 — Experimental placement tool for every line type`.
 - `scripts/set_modio_version.py` preserves Subsidy Manager's preview-first/manual
   confirmation, HTML changelog matching, file-ID validation, conflict protection,
   rechecks and post-write verification. It changes version labels only.
