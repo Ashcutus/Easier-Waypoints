@@ -3,7 +3,6 @@ local builtin = ug_require "::/gui/main/builtin.lua"
 local buttons = ug_require "::/gui/main/button_react_util.tl"
 local tooltips = ug_require "::/gui/line_vehicle_mgmt/manager_tooltips_util.tl"
 local nativePanel = ug_require "::/gui/line_vehicle_mgmt/line_manager_panel.tl"
-local direction = ug_require "easier_waypoints::/plugins/easier_waypoints/direction.lua"
 local game = ug_require "easier_waypoints::/plugins/easier_waypoints/game.lua"
 local placement = ug_require "easier_waypoints::/plugins/easier_waypoints/placement.lua"
 
@@ -13,30 +12,15 @@ local function vertical(children)
     return builtin.BoxLayout {orientation = builtin.type.Orientation.Vertical, children = children}
 end
 
--- Tooltips only receive the hovered candidate. Bad lane data keeps the native
--- tooltip; direction text is only shown alongside an overlay that was built.
-local function laneChildren(waypoint)
-    local ok, preview = pcall(direction.preview, waypoint, game.backend)
-    if not ok then game.warnOnce("tooltip lane data unreadable", preview) end
-    if not ok or not preview then return {} end
-    local rendered, overlay, arrowsBuilt = pcall(game.laneOverlay, preview, true)
-    if rendered and overlay then
-        local detail = game.laneDetail(preview, arrowsBuilt)
-        return detail and {game.tooltipText(detail), overlay} or {overlay}
-    end
-    game.warnOnce("tooltip lane preview unavailable", rendered and "nothing to draw" or overlay)
-    return {game.tooltipText(game.previewUnavailableText(false, false))}
-end
-
-local function tooltipReplacement(name, original, instruction)
-    return react.RegisterRecipe(name, function(waypoint)
-        -- Always return a layout, including native fallback; recipe nodes are opaque.
-        local children = {react.CallOriginalRecipe(original, waypoint)}
-        if instruction then children[#children + 1] = game.tooltipText(instruction()) end
-        for _, child in ipairs(laneChildren(waypoint)) do children[#children + 1] = child end
-        return vertical(children)
-    end)
-end
+-- Tooltips are text only: the engine aborts if world graphics are built inside a
+-- tooltip tree. Lane previews live in the placement tool.
+local Prompt = react.RegisterRecipe("EasierWaypointsPrompt", function(waypoint)
+    -- Always return a layout, including native fallback; recipe nodes are opaque.
+    return vertical({
+        react.CallOriginalRecipe(tooltips.LMPromptWaypointModifier, waypoint),
+        game.tooltipText(_("Hold the key shown above while clicking, or use Add Waypoint in the line panel.")),
+    })
+end)
 
 local WAYPOINT_ICON = "::/gui/construction/menu/menu_categories/category_waypoints.tga"
 
@@ -48,7 +32,7 @@ local function panelState(common)
     if not line or not line.path or not mode or mode[1] ~= "SEGMENT" then return nil end
     -- One literal per message so translation extraction can find it.
     local text = game.stretchText(line, mode[2],
-        _("Adds waypoints between {from} and {to}, with a lane and direction preview. Click the route to choose another part of the line. Right-click or press Esc to finish."))
+        _("Add waypoints between {from} and {to}.\nYou'll see the lane and its direction before you click.\nClick the route to switch to another part of the line.\nRight-click or press Esc when you're done."))
     if not text then return {enabled = false, tooltip = _("Select a stretch of the line first.")} end
     return {enabled = true, tooltip = text}
 end
@@ -72,11 +56,7 @@ local Panel = react.RegisterRecipe("EasierWaypointsPanel", function(params)
 end)
 
 local replacements = {
-    {tooltips.LMAddWaypoint, tooltipReplacement("EasierWaypointsAdd", tooltips.LMAddWaypoint)},
-    {tooltips.LMPromptWaypointModifier, tooltipReplacement("EasierWaypointsPrompt", tooltips.LMPromptWaypointModifier, function()
-        return _("Hold the key shown above while clicking. A click on its own does nothing here.")
-    end)},
-    {tooltips.LMMoveWaypointTarget, tooltipReplacement("EasierWaypointsMove", tooltips.LMMoveWaypointTarget)},
+    {tooltips.LMPromptWaypointModifier, Prompt},
     {nativePanel, Panel},
 }
 

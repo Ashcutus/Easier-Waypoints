@@ -132,63 +132,31 @@ local replacements = {}
 env.data().install({ReplaceRecipe = function(original, replacement) replacements[original] = replacement end})
 local count = 0
 for _ in pairs(replacements) do count = count + 1 end
-assert(count == 4, "Only three tooltip recipes and the stop panel are replaced")
+assert(count == 2, "Only the waypoint prompt tooltip and the stop panel are replaced")
 assert(tools.EasierWaypointsPlacement, "Placement tool registered once at load")
 
 assert(#messages == 1 and messages[1]:find("Easier Waypoints: runtime API", 1, true)
     and messages[1]:find("calcPosition=yes", 1, true), "One runtime report per session")
 
--- Native placement tooltips keep native text and add a lane highlight; a confirmed
--- direction needs no text because the arrow shows it.
-local candidate = {edgePos = {edgeId = {entity = 1, index = 1}, param = 0.5}}
-local result = replacements[tooltips.LMAddWaypoint].fn(candidate)
-assert(result.kind == "layout" and #result.children == 2)
-assert(result.children[1].recipe == tooltips.LMAddWaypoint and result.children[1].param == candidate)
-local overlay = result.children[2]
-assert(overlay.kind == "overlay" and #overlay.edges == 4 and not overlay.ignoreDepth, "Lane plus one arrow")
-assert(overlay.edges[1].geometry == entities[1].network.edges[2].geometry, "Highlight the actual snapped lane")
-result = replacements[tooltips.LMPromptWaypointModifier].fn(candidate)
-assert(#result.children == 3 and result.children[2].text:find("Hold the key shown above while clicking", 1, true),
-    "Prompt says the native key must be held while clicking")
-for _, child in ipairs(result.children) do
-    assert(not child.inlineHintSupport and not (child.text or ""):find("[iaHint", 1, true), "Plain text only, no key markup")
+-- The native prompt keeps its text and adds a plain hint. Tooltips never contain
+-- world graphics: the engine aborts if they are built inside a tooltip tree.
+local function noWorldGraphics(nodeTree)
+    assert(nodeTree.kind ~= "overlay", "No EdgeRenderable inside a tooltip")
+    for _, child in ipairs(nodeTree.children or {}) do noWorldGraphics(child) end
 end
+local candidate = {edgePos = {edgeId = {entity = 1, index = 1}, param = 0.5}}
+local result = replacements[tooltips.LMPromptWaypointModifier].fn(candidate)
+assert(result.kind == "layout" and #result.children == 2)
+assert(result.children[1].recipe == tooltips.LMPromptWaypointModifier and result.children[1].param == candidate)
+assert(result.children[2].text:find("Hold the key shown above while clicking", 1, true)
+    and result.children[2].text:find("Add Waypoint", 1, true), "Prompt explains the key and points to the button")
+assert(not result.children[2].inlineHintSupport and not result.children[2].text:find("[iaHint", 1, true), "Plain text only")
+noWorldGraphics(result)
 result = replacements[tooltips.LMPromptWaypointModifier].fn({pos = vec(1, 2, 3)})
-assert(#result.children == 2 and result.children[2].text:find("Hold the key shown above", 1, true),
-    "Ship/aircraft prompt also explains the modifier")
-entities[1].network.edges[1].geometry.dy = 1
-result = replacements[tooltips.LMMoveWaypointTarget].fn(candidate)
-assert(#result.children == 3 and #result.children[3].edges == 1 and result.children[2].text:find("couldn't be confirmed", 1, true),
-    "Contradictory lane data: highlight without an arrow")
-entities[1].network.edges[1].geometry.dy = -1
-local track = {edgePos = {edgeId = {entity = 2, index = 0}, param = 0.5}}
-result = replacements[tooltips.LMAddWaypoint].fn(track)
-assert(#result.children[3].edges == 7 and result.children[2].text:find("either direction", 1, true), "Rail tracks get both arrows")
-exists = false
-result = replacements[tooltips.LMAddWaypoint].fn(candidate)
-assert(#result.children == 1 and result.children[1].param == candidate, "Stale lane falls back without overlay")
-exists = true
-result = replacements[tooltips.LMAddWaypoint].fn({edgePos = {edgeId = {entity = 3, index = 0}, param = 0.5}})
-assert(#result.children == 1, "Footpath feedback unchanged")
-local constructor = builtin.type.EdgeRenderable.Edge.new
-builtin.type.EdgeRenderable.Edge.new = function() error("unsupported renderer") end
-result = replacements[tooltips.LMAddWaypoint].fn(candidate)
-assert(#result.children == 2 and result.children[2].text:find("Preview unavailable", 1, true)
-    and not result.children[2].text:find("direction of travel", 1, true), "Never describe an arrow that wasn't drawn")
-assert(not result.children[2].text:find("Clicking", 1, true), "The native prompt state still needs the modifier")
-replacements[tooltips.LMMoveWaypointTarget].fn(candidate)
-assert(#warnings == 1 and warnings[1]:find("tooltip lane preview unavailable", 1, true), "Each failure condition is logged once")
-builtin.type.EdgeRenderable.Edge.new = constructor
--- If straight arrow shapes can't be built, the lane fades towards the direction of travel.
-local geometryNew = api.type.EdgeGeometry.new
-api.type.EdgeGeometry.new = nil
-result = replacements[tooltips.LMAddWaypoint].fn(candidate)
-overlay = result.children[3]
-assert(#result.children == 3 and #overlay.edges == 1 and overlay.edges[1].colors[1].w < overlay.edges[1].colors[2].w
-    and result.children[2].text:find("brighter in the direction of travel", 1, true), "Arrow-less fallback still shows direction")
-replacements[tooltips.LMAddWaypoint].fn(candidate)
-assert(#warnings == 2 and warnings[2]:find("direction arrows unavailable", 1, true), "Logged once")
-api.type.EdgeGeometry.new = geometryNew
+assert(#result.children == 2, "Ship/aircraft prompt gets the same hint")
+noWorldGraphics(result)
+assert(not replacements[tooltips.LMAddWaypoint] and not replacements[tooltips.LMMoveWaypointTarget],
+    "Other native tooltips are left alone")
 
 -- Stop panel: one compact waypoint button; the stretch native addWaypoint will edit is in its tooltip.
 local added, pushed, popped = {}, 0, 0
@@ -353,6 +321,7 @@ assert(not tooltip and not find(descriptor.children, "overlay"), "Other lines' r
 assert(#added == 4)
 
 -- A preview that cannot be drawn is reported once and described honestly.
+local constructor = builtin.type.EdgeRenderable.Edge.new
 builtin.type.EdgeRenderable.Edge.new = function() error("unsupported renderer") end
 local lane0 = {edgeId = {entity = 1, index = 0}, param = 0.4}
 selector.onHover(1, {}, {transportNetworkEdge = {snap = lane0}})
@@ -361,8 +330,19 @@ descriptor, selector, tooltip = render()
 assert(not find(descriptor.children, "overlay") and tooltip.param.detail:find("Preview unavailable", 1, true)
     and not tooltip.param.detail:find("arrow", 1, true), "Never describe an arrow nobody can see")
 assert(tooltip.param.detail:find("still uses the lane", 1, true) and inputActions.IA_SELECT.enabled(), "Placement stays available")
-assert(#warnings == 3 and warnings[3]:find("placement lane preview unavailable", 1, true), "Logged once per failure condition")
+assert(#warnings == 1 and warnings[1]:find("placement lane preview unavailable", 1, true), "Logged once per failure condition")
 builtin.type.EdgeRenderable.Edge.new = constructor
+-- If straight arrow shapes can't be built, the lane fades towards the direction of travel.
+local geometryNew = api.type.EdgeGeometry.new
+api.type.EdgeGeometry.new = nil
+selector.onHover(1, {}, {transportNetworkEdge = {snap = {edgeId = {entity = 1, index = 1}, param = 0.3}}})
+render()
+descriptor, selector, tooltip = render()
+overlay = find(descriptor.children, "overlay")
+assert(#overlay.edges == 1 and overlay.edges[1].colors[1].w < overlay.edges[1].colors[2].w
+    and tooltip.param.detail:find("brighter in the direction of travel", 1, true), "Arrow-less fallback still shows direction")
+assert(#warnings == 2 and warnings[2]:find("direction arrows unavailable", 1, true), "Logged once")
+api.type.EdgeGeometry.new = geometryNew
 
 local trackSnap = {edgeId = {entity = 2, index = 0}, param = 0.5}
 selector.onHover(2, {}, {transportNetworkEdge = {snap = trackSnap}})
@@ -515,7 +495,9 @@ function context:setResult(children)
         "Replacement recipes must return a layout")
     self.result = nodes[children[1]]
 end
-for _, recipe in ipairs({realTips.LMAddWaypoint, realTips.LMPromptWaypointModifier, realTips.LMMoveWaypointTarget, realPanel}) do
+assert(not store.recipeReplace[realReact.GetRecipeId(realTips.LMAddWaypoint)]
+    and not store.recipeReplace[realReact.GetRecipeId(realTips.LMMoveWaypointTarget)], "Only the prompt tooltip is replaced")
+for _, recipe in ipairs({realTips.LMPromptWaypointModifier, realPanel}) do
     local id = realReact.GetRecipeId(recipe)
     local replacement = assert(store.recipeReplace[id])
     local replacementId = realReact.GetRecipeId(replacement)
