@@ -21,9 +21,13 @@ local cursor -- ground point under the mouse, or nil
 local gamepad = false
 local shownWindows, soundSets, sounds = {}, {}, {}
 -- Private stop-row recipe as the game's React registry holds it.
-local recipeIdFor = function(name) return name == "LineStopItem" and 501 or 999 end
+local recipeIdFor = function(name)
+    return ({LineStopItem = 501, LineStopItemPreview = 502})[name] or 999
+end
 local nativeRow = function(rowParams) return {kind = "nativeRow", param = rowParams} end
-local registryStore = {recipes = {[501] = function() end}, originalRecipeFn = {[501] = nativeRow}, recipeReplace = {},
+local nativePreview = function(rowParams) return {kind = "nativePreview", param = rowParams} end
+local registryStore = {recipes = {[501] = function() end, [502] = function() end},
+    originalRecipeFn = {[501] = nativeRow, [502] = nativePreview}, recipeReplace = {},
     recipeReplacementAllowed = true}
 local edgeQueries = 0
 local api = {
@@ -289,6 +293,7 @@ stackApi = {
 local common = {
     lineState = {old = function() return line end},
     getModeState = function() return mode end,
+    switchMode = function(newMode) mode = newMode end,
     -- Mirrors native addWaypoint: insert after the selected entry, or before the
     -- last one when none is selected, then select the stretch after the new waypoint.
     addWaypoint = function(waypoint, insertAt)
@@ -314,14 +319,31 @@ local function panel()
     return view
 end
 
-local function waypointButton(panel)
-    local row = panel.children[1]
-    assert(row.kind == "component" and row.meta.class == "ew-waypoint-row", "One compact row above the stop list")
-    return row.layout.children[1]
+-- The stop list's "+" row is rendered by its own recipe with its own hooks.
+local previewHooks, previewStep = {}, nil
+local function stopListRow()
+    local savedHooks, savedIndex, savedStep = hooks, hookIndex, stepFn
+    hooks, hookIndex = previewHooks, 0
+    if previewStep then previewStep() end
+    local view = registryStore.recipeReplace[502].fn(params)
+    previewStep = stepFn
+    hooks, hookIndex, stepFn = savedHooks, savedIndex, savedStep
+    return view
+end
+-- Returns the Add/Finish button and where it is shown: above the list or on the "+" row.
+local function waypointButton(view)
+    local row = view.children[1]
+    if row.kind == "component" and row.meta.class == "ew-waypoint-row" then return row.layout.children[1], "top" end
+    local wrapped = stopListRow()
+    assert(wrapped.kind == "layout" and wrapped.meta.class == "ew-preview-layout"
+        and wrapped.children[1].kind == "nativePreview", "Native '+' row kept first and intact")
+    return wrapped.children[2].layout.children[1], "stop list"
 end
 result = panel()
-assert(#result.children == 2 and result.children[2].recipe == nativePanel and result.children[2].param == params)
-local button = waypointButton(result)
+assert(#result.children == 1 and result.children[1].recipe == nativePanel and result.children[1].param == params,
+    "With a '+' row showing, nothing is added above the list")
+local button, where = waypointButton(result)
+assert(where == "stop list", "The button sits on the stop list's '+' row")
 assert(button.text == "Add Waypoint" and button.class:find("ew-add-waypoint", 1, true) and button.class:find("secondary", 1, true))
 assert(button.icon:find("category_waypoints", 1, true) and button.textClass == "font-scale-annotation", "Small native waypoint button")
 assert(button.enabled and button.tooltip:find("between Station 10 and Station 20", 1, true), "The stretch lives in the tooltip")
@@ -333,8 +355,18 @@ line.path = {{stop = {stationGroup = 20}}, {waypoint = {}}, {stop = {stationGrou
 assert(waypointButton(panel()).tooltip:find("between Station 20 and Station 10", 1, true),
     "No stretch selected: name where native addWaypoint inserts (before the last entry)")
 line.path = normalPath
+local nilPath = #line.path
+mode = {"SEGMENT", nil}
+waypointButton(panel()).onClick()
+assert(mode[1] == "SEGMENT" and mode[2] == nilPath and pushed == 1,
+    "From the '+' row with no stretch selected, the row's own stretch is selected first")
+stackApi.pop(tools.EasierWaypointsPlacement)
+pushed, popped, actionFn = 0, 0, nil
+mode = {"SEGMENT", 0}
+assert(select(2, waypointButton(panel())) == "top", "No '+' row: the button returns above the list")
 mode = {"SEGMENT", -1}
-button = waypointButton(panel())
+button, where = waypointButton(panel())
+assert(where == "top", "No stretch: the disabled button shows above the list")
 assert(button.enabled == false and button.tooltip:find("Select a stretch", 1, true), "Visible but disabled without a stretch")
 mode = {"MOVE_WAYPOINT", {}}
 assert(#panel().children == 1, "Moving a waypoint: native panel only")
@@ -352,7 +384,8 @@ button = waypointButton(panel())
 assert(button.tooltip:find("Preview the point", 1, true) and not button.tooltip:find("Click the route", 1, true),
     "Point lines are not promised a lane or route pick")
 gamepad = true
-button = waypointButton(panel())
+button, where = waypointButton(panel())
+assert(where == "top", "The '+' row is not focusable, so gamepad keeps the button above the list")
 assert(button.tooltip:find("Back", 1, true) and not button.tooltip:find("Esc", 1, true), "Gamepad exit instructions")
 gamepad, line.carriers = false, {road = true}
 
@@ -364,7 +397,9 @@ local function render()
     return descriptor, find(descriptor.children, "selector"), find(descriptor.children, "tooltip")
 end
 mode = {"SEGMENT", nil} -- the Line Manager's state after a waypoint was moved
+gamepad = true -- the top-row button keeps native nil-stretch semantics
 waypointButton(panel()).onClick()
+gamepad = false
 assert(pushed == 1 and actionFn and manager.shelved, "Button pushes the placement tool over the shelved Line Manager")
 local placingButton = waypointButton(panel())
 assert(placingButton.text == "Finish Waypoints" and placingButton.enabled, "Active mode has a visible Finish action")
@@ -674,6 +709,7 @@ local styled = table.concat(selectors, "\n")
 for _, selector in ipairs(selectors) do
     for part in selector:gmatch("[^,]+") do
         assert(part:match("^%s*R::EasierWaypointsPanel ") or part:match("^%s*R::EasierWaypointsStopItem ")
+            or part:match("^%s*R::EasierWaypointsStopPreview ")
             or part:match("^%s*R::EasierWaypointsLineFeedback "),
             "Scoped to the mod's own nodes: " .. part)
     end
@@ -698,8 +734,8 @@ for _, store in ipairs({false, {recipes = {[501] = function() end}, originalReci
     assert(loadfile(root .. "main.script.lua", "t", otherEnv))()
     local before = #warnings
     otherEnv.data().install({ReplaceRecipe = function() end})
-    assert(#warnings == before + 1 and warnings[#warnings]:find("waypoint row text unavailable", 1, true),
-        "Row patch declines and says why, once")
+    assert(#warnings == before + 2 and warnings[#warnings - 1]:find("waypoint row text unavailable", 1, true)
+        and warnings[#warnings]:find("stop list waypoint button unavailable", 1, true), "Both row patches decline and say why, once")
     assert(not store or not store.recipeReplace or store.recipeReplace[501] ~= registry.EasierWaypointsStopItem,
         "Unavailable or occupied registries are left alone")
 end
@@ -742,6 +778,7 @@ local realTips = {LMAddWaypoint = original("NativeAdd"), LMPromptWaypointModifie
 local realPanel = original("NativePanel")
 local realNotifications = original("NativeNotifications")
 local realRow = original("LineStopItem")
+local realPreview = original("LineStopItemPreview")
 recipeIdFor = hostApi.gui.react.detail.makeRecipeId
 local realEnv = environment(realReact, realBuiltin, realTips, realPanel, realButtons, store, realNotifications)
 assert(loadfile(root .. "main.script.lua", "t", realEnv))()
@@ -751,6 +788,9 @@ local rowId = realReact.GetRecipeId(realRow)
 local rowReplacement = store.recipeReplace[rowId]
 assert(rowReplacement and realReact.GetRecipeName(rowReplacement) == "EasierWaypointsStopItem",
     "The private row is replaced by name in the shipped registry")
+local previewReplacement = store.recipeReplace[realReact.GetRecipeId(realPreview)]
+assert(previewReplacement and realReact.GetRecipeName(previewReplacement) == "EasierWaypointsStopPreview",
+    "The private '+' row is replaced by name in the shipped registry")
 local function executeReplacement(recipe, arg, expectedRoot)
     local context = {steps = {}}
     function context:makeNodeWithProps(recipeId, _, props)

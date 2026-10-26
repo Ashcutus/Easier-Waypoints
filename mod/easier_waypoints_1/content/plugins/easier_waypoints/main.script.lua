@@ -92,28 +92,65 @@ local function samePanelState(a, b)
     return a.active == b.active and a.enabled == b.enabled and a.tooltip == b.tooltip
 end
 
-local Panel = react.RegisterRecipe("EasierWaypointsPanel", function(params)
-    local children = {}
-    local stateHook = react.useState(readPanelState(params.commonParams))
+local function usePanelState(common)
+    local stateHook = react.useState(readPanelState(common))
     react.onStep(function()
         if stateHook.hasExpired and stateHook:hasExpired() then return end
-        local nextState = readPanelState(params.commonParams)
+        local nextState = readPanelState(common)
         if not samePanelState(stateHook:old(), nextState) then stateHook:set(nextState) end
     end)
-    local state = stateHook:old()
-    if state then
-        children[#children + 1] = builtin.Component {
-            meta = {class = "ew-waypoint-row"},
-            layout = builtin.BoxLayout {
-                orientation = builtin.type.Orientation.Horizontal,
-                children = {buttons.makeIconTextButton("secondary, ew-add-waypoint", WAYPOINT_ICON,
-                    state.active and _("Finish Waypoints") or _("Add Waypoint"), function()
-                        if placement.isActive(params.commonParams) then placement.finish(params.commonParams)
-                        else placement.start(params.commonParams) end
-                    end, state.tooltip, state.enabled, nil,
-                    "font-scale-annotation")},
-            },
-        }
+    return stateHook:old()
+end
+
+-- From the "+" row with no stretch selected, select the stretch the row shows
+-- (after the last entry) so the waypoint lands where the button is.
+local function waypointRow(common, state, fromStopList)
+    return builtin.Component {
+        meta = {class = "ew-waypoint-row"},
+        layout = builtin.BoxLayout {
+            orientation = builtin.type.Orientation.Horizontal,
+            children = {buttons.makeIconTextButton("secondary, ew-add-waypoint", WAYPOINT_ICON,
+                state.active and _("Finish Waypoints") or _("Add Waypoint"), function()
+                    if placement.isActive(common) then
+                        placement.finish(common)
+                        return
+                    end
+                    local mode = common.getModeState()
+                    local line = common.lineState and common.lineState:old()
+                    if fromStopList and mode and mode[1] == "SEGMENT" and mode[2] == nil and line and line.path then
+                        common.switchMode({"SEGMENT", #line.path})
+                    end
+                    placement.start(common)
+                end, state.tooltip, state.enabled, nil, "font-scale-annotation")},
+        },
+    }
+end
+
+-- The stop list draws its "+" row in SEGMENT mode at mode[2] (or the last entry).
+local function stopListRowShown(common)
+    local mode = common.getModeState()
+    local line = common.lineState and common.lineState:old()
+    if not mode or mode[1] ~= "SEGMENT" or not line or not line.path then return false end
+    local insertAt = mode[2] or #line.path
+    return type(insertAt) == "number" and insertAt >= 1 and insertAt <= #line.path
+end
+
+local stopListButton = false
+
+-- The button lives on the stop list's "+" row when that patch is active. The top
+-- row stays as the fallback: no "+" row, patch declined, or gamepad (the "+" row
+-- is not focusable).
+local function topRowShown(common)
+    if not stopListButton or appUtil.isGamepadInputMode() then return true end
+    local ok, shown = pcall(stopListRowShown, common)
+    return not ok or not shown
+end
+
+local Panel = react.RegisterRecipe("EasierWaypointsPanel", function(params)
+    local children = {}
+    local state = usePanelState(params.commonParams)
+    if state and topRowShown(params.commonParams) then
+        children[#children + 1] = waypointRow(params.commonParams, state, false)
     end
     children[#children + 1] = react.CallOriginalRecipe(nativePanel, params)
     return vertical(children)
@@ -167,19 +204,32 @@ local StopRow = react.RegisterRecipe("EasierWaypointsStopItem", function(params)
     }}
 end)
 
-local function replacePrivateRow()
+-- The "+ Add the next stop here" row: Add/Finish Waypoints goes on its own line
+-- under the native box, which keeps the native row and its sizes untouched.
+local STOP_LIST_PREVIEW = "LineStopItemPreview"
+local originalPreview
+
+local StopPreview = react.RegisterRecipe("EasierWaypointsStopPreview", function(params)
+    local state = usePanelState(params.commonParams)
+    local native = originalPreview(params)
+    if not state or not stopListButton or appUtil.isGamepadInputMode() then return native end
+    return builtin.BoxLayout {orientation = builtin.type.Orientation.Vertical, meta = {class = "ew-preview-layout"},
+        children = {native, waypointRow(params.commonParams, state, true)}}
+end)
+
+-- Returns the original recipe, or nil and why the replacement was declined.
+local function replacePrivate(name, replacement)
     local registry = _react
     local detail = api.gui.react and api.gui.react.detail
-    if type(registry) ~= "table" or not detail or not detail.makeRecipeId then return "registry unavailable" end
-    local id = detail.makeRecipeId(STOP_ROW)
+    if type(registry) ~= "table" or not detail or not detail.makeRecipeId then return nil, "registry unavailable" end
+    local id = detail.makeRecipeId(name)
     if not (registry.recipes and registry.recipes[id] and registry.originalRecipeFn and registry.originalRecipeFn[id]) then
-        return "stop row recipe not found"
+        return nil, name .. " recipe not found"
     end
-    if not registry.recipeReplace or registry.recipeReplace[id] then return "stop row already replaced" end
-    if registry.recipeReplacementAllowed == false then return "replacement window closed" end
-    originalRow = registry.originalRecipeFn[id]
-    registry.recipeReplace[id] = StopRow
-    return nil
+    if not registry.recipeReplace or registry.recipeReplace[id] then return nil, name .. " already replaced" end
+    if registry.recipeReplacementAllowed == false then return nil, "replacement window closed" end
+    registry.recipeReplace[id] = replacement
+    return registry.originalRecipeFn[id]
 end
 
 local replacements = {
@@ -194,8 +244,12 @@ function data()
             for _, pair in ipairs(replacements) do
                 replacementApi.ReplaceRecipe(pair[1], pair[2])
             end
-            local ok, problem = pcall(replacePrivateRow)
-            if not ok or problem then game.warnOnce("waypoint row text unavailable", ok and problem or tostring(problem)) end
+            local ok, original, problem = pcall(replacePrivate, STOP_ROW, StopRow)
+            if ok and original then originalRow = original
+            else game.warnOnce("waypoint row text unavailable", ok and problem or tostring(original)) end
+            ok, original, problem = pcall(replacePrivate, STOP_LIST_PREVIEW, StopPreview)
+            if ok and original then originalPreview, stopListButton = original, true
+            else game.warnOnce("stop list waypoint button unavailable", ok and problem or tostring(original)) end
         end,
     }
 end

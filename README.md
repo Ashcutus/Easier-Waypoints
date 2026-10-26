@@ -15,8 +15,9 @@ Version **0.3.0**, game revision **3**. **Experimental:** not yet verified in-ga
 - A waypoint pin and count beside each line name in the Line Manager. The count
   updates as waypoints are added or removed and is hidden when there are none.
   Hover over the badge for an explanation; native warning icons stay visible.
-- An **Add Waypoint** button above the stop list while you edit a line. Its tooltip
-  says which part of the line new waypoints go into. While placing, it becomes
+- An **Add Waypoint** button on the stop list's "+" row, where the next item goes, while
+  you edit a line (above the list when there is no "+" row, and on a gamepad). Its
+  tooltip says which part of the line new waypoints go into. While placing, it becomes
   **Finish Waypoints**, so the active mode and its exit stay visible.
 - The placement tool highlights the lane under the cursor (red where the line's
   vehicles can't go) and shows the direction of travel before you click. Each click
