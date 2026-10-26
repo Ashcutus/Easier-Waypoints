@@ -26,6 +26,10 @@ function data()
     a("R::EasierWaypointsPanel Button!ew-add-waypoint TextView", {
         gravity = { 0, 0.5 },
     })
+    -- The "+" row keeps its native layout; the button sits on its own line below.
+    a("R::EasierWaypointsStopPreview BoxLayout!ew-preview-layout", {
+        gravity = { -1, 0 },
+    })
     -- Waypoint rows: the label sits where a stop's name would be.
     a("R::EasierWaypointsStopItem FloatingLayout!ew-waypoint-row-layout", {
         gravity = { -1, -1 },
@@ -38,6 +42,22 @@ function data()
     a("R::EasierWaypointsStopItem !ew-waypoint-label TextView", {
         size = { 232, -1 },
         maxSize = { 232, -1 },
+        textAutoWrap = false,
+    })
+    a("R::EasierWaypointsLineFeedback !ew-line-waypoints", {
+        margin = { 0, 4, 0, 4 },
+        gravity = { 0, 0.5 },
+    })
+    a("R::EasierWaypointsLineFeedback !ew-line-waypoints BoxLayout", {
+        innerSpacing = { 3, 0 },
+        gravity = { 0, 0.5 },
+    })
+    a("R::EasierWaypointsLineFeedback !ew-line-waypoints ImageView", {
+        size = { 12, 12 },
+        gravity = { 0, 0.5 },
+    })
+    a("R::EasierWaypointsLineFeedback !ew-line-waypoints TextView", {
+        gravity = { 0, 0.5 },
         textAutoWrap = false,
     })
     return result

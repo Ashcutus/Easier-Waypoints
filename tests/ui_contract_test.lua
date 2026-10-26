@@ -21,9 +21,13 @@ local cursor -- ground point under the mouse, or nil
 local gamepad = false
 local shownWindows, soundSets, sounds = {}, {}, {}
 -- Private stop-row recipe as the game's React registry holds it.
-local recipeIdFor = function(name) return name == "LineStopItem" and 501 or 999 end
+local recipeIdFor = function(name)
+    return ({LineStopItem = 501, LineStopItemPreview = 502})[name] or 999
+end
 local nativeRow = function(rowParams) return {kind = "nativeRow", param = rowParams} end
-local registryStore = {recipes = {[501] = function() end}, originalRecipeFn = {[501] = nativeRow}, recipeReplace = {},
+local nativePreview = function(rowParams) return {kind = "nativePreview", param = rowParams} end
+local registryStore = {recipes = {[501] = function() end, [502] = function() end},
+    originalRecipeFn = {[501] = nativeRow, [502] = nativePreview}, recipeReplace = {},
     recipeReplacementAllowed = true}
 local edgeQueries = 0
 local api = {
@@ -43,7 +47,7 @@ local api = {
         getRevision = function(entity) return (entities[entity] or {}).revision or {num = {1, 1, 1}} end,
         getComponent = function(entity, component)
             local e = entities[entity] or {}
-            return ({network = e.network, base = e.base, street = e.street, world = e.world})[component]
+            return ({network = e.network, base = e.base, street = e.street, world = e.world, line = e.line})[component]
         end,
         util = {getEntityName = function(entity) return entities[entity] and entities[entity].name end,
             -- Lanes run along y through y = 20 at t = 0.5, in the direction of dy.
@@ -70,7 +74,7 @@ local api = {
 }
 
 local registry, tools = {}, {}
-local hooks, hookIndex, inputActions, stepFn, expired = {}, 0, {}, nil, false
+local hooks, hookIndex, inputActions, stepFn, expired, timerFn = {}, 0, {}, nil, false, nil
 local react = {
     RegisterRecipe = function(name, fn) local recipe = {name = name, fn = fn}; registry[name] = recipe; return recipe end,
     CallOriginalRecipe = function(original, param) return {kind = "original", recipe = original, param = param} end,
@@ -88,9 +92,10 @@ local react = {
     end,
     useInputAction = function(key, handler) inputActions[key] = handler end,
     onStep = function(fn) stepFn = fn end,
+    onStepTimer = function(fn, interval) assert(interval == 0.25); timerFn = fn end,
     iaHandler = function(fn, enabled, text) return {fn = fn, enabled = enabled, text = text} end,
 }
-local builtin = {BoxLayout = node("layout"), TextView = node("text"), EdgeRenderable = node("overlay"), Component = node("component"),
+local builtin = {BoxLayout = node("layout"), TextView = node("text"), ImageView = node("image"), EdgeRenderable = node("overlay"), Component = node("component"),
     FloatingLayout = node("floating"), FloatingLayoutChild = node("floatingChild"),
     Selector = node("selector"), LineViewer = node("lineViewer"), ActionDescriptor = node("action"),
     ActionTooltip = node("tooltip"),
@@ -110,17 +115,19 @@ local buttons = {makeIconTextButton = function(class, icon, text, onClick, toolt
 end}
 local langUtil = {format = function(message, values) return (message:gsub("{(.-)}", function(k) return tostring(values[k]) end)) end}
 local nativePanel = {name = "native panel"}
+local nativeNotifications = {name = "native notifications"}
 local tooltips = {LMAddWaypoint = {}, LMPromptWaypointModifier = {}, LMMoveWaypointTarget = {}}
 local warnings = {}
 local messages = {}
 local log = {warning = function(message) warnings[#warnings + 1] = message end,
     message = function(message) messages[#messages + 1] = message end}
 
-local function environment(reactApi, builtins, tips, panel, buttonApi, store)
+local function environment(reactApi, builtins, tips, panel, buttonApi, store, notifications)
     local env, cache = nil, {}
     local doubles = {
         ["/react.lua"] = reactApi, ["/builtin.lua"] = builtins, ["manager_tooltips_util.tl"] = tips,
         ["line_manager_panel.tl"] = panel, ["button_react_util.tl"] = buttonApi, ["/line_util.tl"] = lineUtil,
+        ["/line_react_util.tl"] = {ManagerNotificationWidget = notifications or nativeNotifications},
         ["lang_util.tl"] = langUtil, ["app_util.tl"] = {isGamepadInputMode = function() return gamepad end},
         ["hud_react_util.tl"] = {makeDefaultLineViewerSnapFactors = function() return {view = 0.05, world = 10} end},
     }
@@ -144,7 +151,7 @@ local replacements = {}
 env.data().install({ReplaceRecipe = function(original, replacement) replacements[original] = replacement end})
 local count = 0
 for _ in pairs(replacements) do count = count + 1 end
-assert(count == 2, "Only the waypoint prompt tooltip and the stop panel are replaced")
+assert(count == 3, "Only the waypoint prompt, stop panel and exported notification widget are replaced")
 assert(tools.EasierWaypointsPlacement, "Placement tool registered once at load")
 
 assert(#messages == 1 and messages[1]:find("Easier Waypoints: runtime API", 1, true)
@@ -169,6 +176,44 @@ assert(#result.children == 2, "Ship/aircraft prompt gets the same hint")
 noWorldGraphics(result)
 assert(not replacements[tooltips.LMAddWaypoint] and not replacements[tooltips.LMMoveWaypointTarget],
     "Other native tooltips are left alone")
+
+-- Each line gets a pin/count beside its name, preserving native notifications.
+entities[81] = {line = {stops = {{waypoints = {{edgePos = {}}, {pos = vec(1, 2, 0)}}},
+    {waypoints = {{edgePos = {}}}}, {}}}}
+entities[82] = {name = "Depot"}
+local feedbackHooks, feedbackTimers = {}, {}
+local function feedback(entity)
+    local savedHooks, savedIndex, savedTimer = hooks, hookIndex, timerFn
+    feedbackHooks[entity] = feedbackHooks[entity] or {}
+    hooks, hookIndex = feedbackHooks[entity], 0
+    if feedbackTimers[entity] then feedbackTimers[entity]() end
+    local view = replacements[nativeNotifications].fn(entity)
+    feedbackTimers[entity] = timerFn
+    hooks, hookIndex, timerFn = savedHooks, savedIndex, savedTimer
+    return view
+end
+local lineFeedback = feedback(81)
+local badge = lineFeedback.children[1]
+assert(#lineFeedback.children == 2 and badge.meta.class == "ew-line-waypoints")
+assert(badge.layout.children[1].kind == "image" and badge.layout.children[1].path:find("category_waypoints", 1, true))
+assert(badge.layout.children[2].text == "3" and badge.meta.tooltip:find("3 waypoints", 1, true),
+    "Count edge and point waypoints across all stops, not the stops themselves")
+assert(not badge.onClick and not badge.meta.forceFocusable and not badge.meta.mouseTransparent,
+    "The badge has a tooltip without adding a focus target or intercepting native actions")
+assert(lineFeedback.children[2].recipe == nativeNotifications and lineFeedback.children[2].param == 81,
+    "Line problems and other native notifications are preserved")
+entities[81].line.stops = {{waypoints = {{}}}}
+lineFeedback = feedback(81)
+assert(lineFeedback.children[1].layout.children[2].text == "1"
+    and lineFeedback.children[1].meta.tooltip:find("1 waypoint.", 1, true), "Live count and singular tooltip")
+entities[81].line.stops = {{}, {waypoints = {}}}
+assert(#feedback(81).children == 1, "No badge when the last waypoint is removed")
+assert(#feedback(82).children == 1 and #feedback(9999).children == 1, "Depots and deleted entities keep native feedback only")
+entities[81].line.stops = {{waypoints = {{}, {}}}}
+assert(feedback(81).children[1].layout.children[2].text == "2", "A count added later becomes visible")
+expired = true
+feedbackTimers[81]()
+expired = false
 
 -- Waypoint rows in the stop list get text; stop rows stay exactly native.
 local StopRow = registry.EasierWaypointsStopItem
@@ -248,6 +293,7 @@ stackApi = {
 local common = {
     lineState = {old = function() return line end},
     getModeState = function() return mode end,
+    switchMode = function(newMode) mode = newMode end,
     -- Mirrors native addWaypoint: insert after the selected entry, or before the
     -- last one when none is selected, then select the stretch after the new waypoint.
     addWaypoint = function(waypoint, insertAt)
@@ -273,14 +319,31 @@ local function panel()
     return view
 end
 
-local function waypointButton(panel)
-    local row = panel.children[1]
-    assert(row.kind == "component" and row.meta.class == "ew-waypoint-row", "One compact row above the stop list")
-    return row.layout.children[1]
+-- The stop list's "+" row is rendered by its own recipe with its own hooks.
+local previewHooks, previewStep = {}, nil
+local function stopListRow()
+    local savedHooks, savedIndex, savedStep = hooks, hookIndex, stepFn
+    hooks, hookIndex = previewHooks, 0
+    if previewStep then previewStep() end
+    local view = registryStore.recipeReplace[502].fn(params)
+    previewStep = stepFn
+    hooks, hookIndex, stepFn = savedHooks, savedIndex, savedStep
+    return view
+end
+-- Returns the Add/Finish button and where it is shown: above the list or on the "+" row.
+local function waypointButton(view)
+    local row = view.children[1]
+    if row.kind == "component" and row.meta.class == "ew-waypoint-row" then return row.layout.children[1], "top" end
+    local wrapped = stopListRow()
+    assert(wrapped.kind == "layout" and wrapped.meta.class == "ew-preview-layout"
+        and wrapped.children[1].kind == "nativePreview", "Native '+' row kept first and intact")
+    return wrapped.children[2].layout.children[1], "stop list"
 end
 result = panel()
-assert(#result.children == 2 and result.children[2].recipe == nativePanel and result.children[2].param == params)
-local button = waypointButton(result)
+assert(#result.children == 1 and result.children[1].recipe == nativePanel and result.children[1].param == params,
+    "With a '+' row showing, nothing is added above the list")
+local button, where = waypointButton(result)
+assert(where == "stop list", "The button sits on the stop list's '+' row")
 assert(button.text == "Add Waypoint" and button.class:find("ew-add-waypoint", 1, true) and button.class:find("secondary", 1, true))
 assert(button.icon:find("category_waypoints", 1, true) and button.textClass == "font-scale-annotation", "Small native waypoint button")
 assert(button.enabled and button.tooltip:find("between Station 10 and Station 20", 1, true), "The stretch lives in the tooltip")
@@ -292,8 +355,18 @@ line.path = {{stop = {stationGroup = 20}}, {waypoint = {}}, {stop = {stationGrou
 assert(waypointButton(panel()).tooltip:find("between Station 20 and Station 10", 1, true),
     "No stretch selected: name where native addWaypoint inserts (before the last entry)")
 line.path = normalPath
+local nilPath = #line.path
+mode = {"SEGMENT", nil}
+waypointButton(panel()).onClick()
+assert(mode[1] == "SEGMENT" and mode[2] == nilPath and pushed == 1,
+    "From the '+' row with no stretch selected, the row's own stretch is selected first")
+stackApi.pop(tools.EasierWaypointsPlacement)
+pushed, popped, actionFn = 0, 0, nil
+mode = {"SEGMENT", 0}
+assert(select(2, waypointButton(panel())) == "top", "No '+' row: the button returns above the list")
 mode = {"SEGMENT", -1}
-button = waypointButton(panel())
+button, where = waypointButton(panel())
+assert(where == "top", "No stretch: the disabled button shows above the list")
 assert(button.enabled == false and button.tooltip:find("Select a stretch", 1, true), "Visible but disabled without a stretch")
 mode = {"MOVE_WAYPOINT", {}}
 assert(#panel().children == 1, "Moving a waypoint: native panel only")
@@ -311,7 +384,8 @@ button = waypointButton(panel())
 assert(button.tooltip:find("Preview the point", 1, true) and not button.tooltip:find("Click the route", 1, true),
     "Point lines are not promised a lane or route pick")
 gamepad = true
-button = waypointButton(panel())
+button, where = waypointButton(panel())
+assert(where == "top", "The '+' row is not focusable, so gamepad keeps the button above the list")
 assert(button.tooltip:find("Back", 1, true) and not button.tooltip:find("Esc", 1, true), "Gamepad exit instructions")
 gamepad, line.carriers = false, {road = true}
 
@@ -323,7 +397,9 @@ local function render()
     return descriptor, find(descriptor.children, "selector"), find(descriptor.children, "tooltip")
 end
 mode = {"SEGMENT", nil} -- the Line Manager's state after a waypoint was moved
+gamepad = true -- the top-row button keeps native nil-stretch semantics
 waypointButton(panel()).onClick()
+gamepad = false
 assert(pushed == 1 and actionFn and manager.shelved, "Button pushes the placement tool over the shelved Line Manager")
 local placingButton = waypointButton(panel())
 assert(placingButton.text == "Finish Waypoints" and placingButton.enabled, "Active mode has a visible Finish action")
@@ -604,6 +680,19 @@ panelStep()
 rowSteps[2]()
 expired = false
 
+local getComponent = api.engine.getComponent
+api.engine.getComponent = function(entity, component)
+    if entity == 81 then error("line temporarily unreadable") end
+    return getComponent(entity, component)
+end
+local warningsBeforeCount = #warnings
+assert(#feedback(81).children == 1 and #feedback(81).children == 1,
+    "Unreadable line data hides the badge rather than retaining an old count")
+assert(#warnings == warningsBeforeCount + 1 and warnings[#warnings]:find("line waypoint count unavailable", 1, true),
+    "A failed count is logged once")
+api.engine.getComponent = getComponent
+assert(feedback(81).children[1].layout.children[2].text == "2", "The badge recovers after a temporary read failure")
+
 -- The stylesheet only styles this mod's panel row, never native widgets elsewhere.
 local selectors = {}
 local cssEnv = setmetatable({require = function(path)
@@ -619,7 +708,9 @@ assert(#styles == #selectors and #selectors > 0)
 local styled = table.concat(selectors, "\n")
 for _, selector in ipairs(selectors) do
     for part in selector:gmatch("[^,]+") do
-        assert(part:match("^%s*R::EasierWaypointsPanel ") or part:match("^%s*R::EasierWaypointsStopItem "),
+        assert(part:match("^%s*R::EasierWaypointsPanel ") or part:match("^%s*R::EasierWaypointsStopItem ")
+            or part:match("^%s*R::EasierWaypointsStopPreview ")
+            or part:match("^%s*R::EasierWaypointsLineFeedback "),
             "Scoped to the mod's own nodes: " .. part)
     end
 end
@@ -643,8 +734,8 @@ for _, store in ipairs({false, {recipes = {[501] = function() end}, originalReci
     assert(loadfile(root .. "main.script.lua", "t", otherEnv))()
     local before = #warnings
     otherEnv.data().install({ReplaceRecipe = function() end})
-    assert(#warnings == before + 1 and warnings[#warnings]:find("waypoint row text unavailable", 1, true),
-        "Row patch declines and says why, once")
+    assert(#warnings == before + 2 and warnings[#warnings - 1]:find("waypoint row text unavailable", 1, true)
+        and warnings[#warnings]:find("stop list waypoint button unavailable", 1, true), "Both row patches decline and say why, once")
     assert(not store or not store.recipeReplace or store.recipeReplace[501] ~= registry.EasierWaypointsStopItem,
         "Unavailable or occupied registries are left alone")
 end
@@ -685,9 +776,11 @@ end}
 local function original(name) return realReact.RegisterRecipe(name, function() return realBuiltin.BoxLayout {children = {}} end) end
 local realTips = {LMAddWaypoint = original("NativeAdd"), LMPromptWaypointModifier = original("NativePrompt"), LMMoveWaypointTarget = original("NativeMove")}
 local realPanel = original("NativePanel")
+local realNotifications = original("NativeNotifications")
 local realRow = original("LineStopItem")
+local realPreview = original("LineStopItemPreview")
 recipeIdFor = hostApi.gui.react.detail.makeRecipeId
-local realEnv = environment(realReact, realBuiltin, realTips, realPanel, realButtons, store)
+local realEnv = environment(realReact, realBuiltin, realTips, realPanel, realButtons, store, realNotifications)
 assert(loadfile(root .. "main.script.lua", "t", realEnv))()
 realEnv.data().install({ReplaceRecipe = realReact.GloballyReplaceRecipeBeforeInitInternal})
 assert(store.tools.EasierWaypointsPlacement, "Placement tool registered in the shipped registry")
@@ -695,6 +788,9 @@ local rowId = realReact.GetRecipeId(realRow)
 local rowReplacement = store.recipeReplace[rowId]
 assert(rowReplacement and realReact.GetRecipeName(rowReplacement) == "EasierWaypointsStopItem",
     "The private row is replaced by name in the shipped registry")
+local previewReplacement = store.recipeReplace[realReact.GetRecipeId(realPreview)]
+assert(previewReplacement and realReact.GetRecipeName(previewReplacement) == "EasierWaypointsStopPreview",
+    "The private '+' row is replaced by name in the shipped registry")
 local function executeReplacement(recipe, arg, expectedRoot)
     local context = {steps = {}}
     function context:makeNodeWithProps(recipeId, _, props)
@@ -707,6 +803,7 @@ local function executeReplacement(recipe, arg, expectedRoot)
             hasExpired = function() return false end}
     end
     function context:onStep(fn) self.steps[#self.steps + 1] = fn end
+    function context:onStepTimer(fn, interval) assert(interval == 0.25); self.steps[#self.steps + 1] = fn end
     function context:setResult(children)
         assert(#children == 1 and nodes[children[1]].recipeId == expectedRoot,
             "Replacement returned an unexpected root recipe")
@@ -727,6 +824,12 @@ for _, recipe in ipairs({realTips.LMPromptWaypointModifier, realPanel}) do
         context.steps[1]()
     end
 end
+local feedbackContext = executeReplacement(realNotifications, 81, store.builtin.BoxLayout)
+assert(#feedbackContext.steps == 1, "The badge refresh timer registers through the shipped React hooks")
+feedbackContext.steps[1]()
+local feedbackChildren = feedbackContext.result.props.props[1].children
+assert(#feedbackChildren == 2 and nodes[feedbackChildren[2]].recipeId == realReact.GetRecipeId(realNotifications)
+    and nodes[feedbackChildren[2]].props.props[1] == 81, "The real registry preserves the native notification node")
 local rowParams = {stopNumber = 1, viaState = {old = function() return rowPath end},
     commonParams = {lineState = {old = function() return rowLine end}}}
 local stopContext = executeReplacement(realRow, rowParams, rowId)

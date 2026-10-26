@@ -71,6 +71,23 @@ function M.lineCarriers(carriers)
     return result
 end
 
+function M.waypointCount(entity)
+    if not entity or not api.engine.entityExists(entity) then return 0 end
+    local line = api.engine.getComponent(entity, api.type.ComponentType.LINE)
+    if not line then return 0 end
+    local count = 0
+    for _, stop in ipairs(line.stops or {}) do
+        count = count + #(stop.waypoints or {})
+    end
+    return count
+end
+
+function M.waypointCountText(count)
+    if count == 1 then return _("This line contains 1 waypoint. Select the line to locate or edit it.") end
+    return langUtil.format(_("This line contains {count} waypoints. Select the line to locate or edit them."),
+        {count = tostring(count)})
+end
+
 M.backend = {
     -- Streets carry their own lane config; tracks and junction lanes do not.
     edgeInfo = function(entity)
